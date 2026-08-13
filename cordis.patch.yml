@@ -1,0 +1,13 @@
+# dsh-wecom: mount one WeCom AI Bot long connection per plugin instance.
+#
+# `insert` appends a host-level plugin row. Override any field (policy, preset,
+# timeouts, wsUrl) in the target profile's `cordis.patch.yml`.
+- insert:
+    - id: wecom-channel
+      name: dsh-wecom
+      config:
+        botId: !!js process.env.WECOM_BOT_ID
+        credentialName: WECOM_BOT_SECRET
+        namespace: default
+        cwd: !!js process.env.DSH_WECOM_CWD ?? process.cwd()
+        preset: standard
