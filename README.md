@@ -92,6 +92,10 @@ Tune the mounted row in `~/.dsh/profiles/web/cordis.patch.yml`:
 | `groupAllowlist` | `[]` | group-chat chatid allowlist |
 | `instructions` | enterprise-chat guidance | instruction section layered on the persona every turn |
 | `imageMode` | `auto` | `auto` attaches images when the model can view them; `always` / `never` force it |
+| `streaming` | `true` | stream model text token-by-token; `false` sends only the ack + final answer |
+| `streamFlushMs` | `250` | cadence (ms) for flushing accumulated streamed text |
+| `showReasoning` | `true` | wrap model reasoning in WeCom's native `<think>` card (the collapsible "思考过程") |
+| `showToolCalls` | `true` | append a tool-call activity summary to the final reply |
 | `maxConcurrent` | `4` | global cap on concurrent turns |
 | `turnTimeoutMs` | `300000` | per-turn timeout (cancels the turn) |
 

@@ -9,9 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Token-level streaming: model text and reasoning deltas are flushed to WeCom
+  as they are produced (`streaming`, default on; `streamFlushMs` controls the
+  cadence), instead of a single "Working…" ack + final answer.
+- Native thinking card: reasoning rides inside a `<think>` block that stays
+  open while the model thinks and closes when the answer starts, which the
+  WeCom client renders as its collapsible "思考过程" card (`showReasoning`,
+  default on). Nested/foreign think tags are stripped so exactly one block is
+  sent.
+- Optional tool-call activity list on the final reply (`showToolCalls`, default
+  on), budgeted under the WeCom reply byte cap.
 - Runtime overview in `GET /api/wecom/status` and the sidebar panel: live
   agents (running first, WeCom-flagged, with model), session counts (total and
   WeCom), and process/machine load (RSS, uptime, load average).
+
+### Fixed
+
+- A WeCom message no longer fails with `cannot prepare session ... while it is
+  live` when the conversation's session is already open elsewhere (e.g. the
+  user opened it in the web UI, which resumes the persisted session). The pool
+  now adopts the live agent instead of resuming it a second time, and re-opens
+  the conversation when an agent it tracked was disposed by its owner.
+- Continuing a chat after its session was archived in the web UI no longer
+  keeps the conversation invisible forever: the harness has no unarchive API,
+  so the pool skips archived session ids and starts a fresh, visible session
+  for new WeCom activity.
 - Restart loop (`runChannelLoop`): the channel restarts itself after every
   unrecoverable end — auth failure, reconnect exhaustion, or replacement by
   another client — after `restartIntervalMs` (default 10s), instead of leaving

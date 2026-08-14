@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { conversationId } from '../src/helpers.js'
 import { AgentPool } from '../src/pool.js'
 import { testConfig } from './test-config.js'
 
@@ -6,21 +7,44 @@ interface FakeAgent {
   status: 'idle' | 'running'
   options: { provider: string; model: string }
   session: { events: unknown[] }
+  ctx: {
+    on: (event: string, handler: (...args: unknown[]) => void) => () => boolean
+    systemPrompt: { section: ReturnType<typeof vi.fn> }
+  }
   cancel: ReturnType<typeof vi.fn>
   followup: ReturnType<typeof vi.fn>
   whenIdle: ReturnType<typeof vi.fn>
 }
 
-function makeAgent(options: { hang?: boolean; replyText?: string } = {}): FakeAgent {
+function makeAgent(
+  options: { hang?: boolean; replyText?: string; stream?: unknown[] } = {},
+): FakeAgent {
   const events: unknown[] = []
+  const handlers = new Map<string, Set<(...args: unknown[]) => void>>()
+  const fire = (event: string, ...args: unknown[]): void => {
+    for (const handler of handlers.get(event) ?? []) handler(...args)
+  }
   const agent: FakeAgent = {
     status: 'idle',
     options: { provider: 'deepseek', model: 'deepseek-chat' },
     session: { events },
+    ctx: {
+      on: (event: string, handler: (...args: unknown[]) => void) => {
+        const set = handlers.get(event) ?? new Set<(...args: unknown[]) => void>()
+        set.add(handler)
+        handlers.set(event, set)
+        return () => set.delete(handler)
+      },
+      systemPrompt: { section: vi.fn() },
+    },
     cancel: vi.fn(),
     followup: vi.fn(() => {
       agent.status = 'running'
       if (options.hang) return
+      for (const event of options.stream ?? []) {
+        events.push(event)
+        fire('session/event', agent.session, event)
+      }
       events.push({
         type: 'assistant/message',
         data: {
@@ -43,6 +67,7 @@ function makeHarness() {
   const sections: Array<{ name: string; order: number; text: string }> = []
   const disposed: string[] = []
   const created: Array<{ sessionId: string }> = []
+  const live = new Map<string, unknown>()
 
   const section = vi.fn((s: { name: string; order: number; text: string }) => {
     sections.push(s)
@@ -71,7 +96,14 @@ function makeHarness() {
           created.push({ sessionId: options.sessionId })
           const agent = makeAgent()
           if (options.setup) await options.setup({ systemPrompt: { section } })
-          return { agent, dispose: vi.fn(async () => disposed.push(options.sessionId)) }
+          live.set(options.sessionId, agent)
+          return {
+            agent,
+            dispose: vi.fn(async () => {
+              disposed.push(options.sessionId)
+              live.delete(options.sessionId)
+            }),
+          }
         },
       ),
       resume: vi.fn(
@@ -81,14 +113,20 @@ function makeHarness() {
         }) => {
           const agent = makeAgent()
           if (options.setup) await options.setup({ systemPrompt: { section } })
-          return { agent, dispose: vi.fn(async () => undefined) }
+          live.set(options.resumeSessionId, agent)
+          return {
+            agent,
+            dispose: vi.fn(async () => {
+              live.delete(options.resumeSessionId)
+            }),
+          }
         },
       ),
-      get: vi.fn(),
+      get: vi.fn((id: string) => live.get(id)),
     },
     get: vi.fn(() => undefined),
   }
-  return { ctx, mounts, sections, disposed, created }
+  return { ctx, mounts, sections, disposed, created, live }
 }
 
 function singleMessage(text = 'hello'): never {
@@ -321,5 +359,208 @@ describe('AgentPool', () => {
     await manager.start()
     await manager.handle(singleMessage('x'.repeat(120)), noopDownload)
     expect(renamed).toEqual([`${'x'.repeat(59)}…`])
+  })
+
+  it('streams text deltas and captures reasoning + tool calls', async () => {
+    const deltas: Array<{ kind: string; text: string }> = []
+    const agent = makeAgent({
+      stream: [
+        {
+          type: 'assistant/chunk',
+          data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'Hel' } },
+        },
+        {
+          type: 'assistant/chunk',
+          data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'lo' } },
+        },
+        {
+          type: 'assistant/chunk',
+          data: {
+            turn: 1,
+            step: 1,
+            chunk: { type: 'reasoning-delta', index: 1, text: 'thinking…' },
+          },
+        },
+        {
+          type: 'tool/call',
+          data: { turn: 1, step: 1, callId: 'c1', name: 'bash', arguments: '{"cmd":"ls"}' },
+        },
+        {
+          type: 'tool/result',
+          data: { turn: 1, step: 1, message: { source: { kind: 'tool', callId: 'c1' } } },
+        },
+      ],
+    })
+    const ctx = {
+      logger: () => ({ debug() {}, info() {}, warn() {}, error() {} }),
+      sessionPersistence: { list: vi.fn(async () => []) },
+      agentDefaultModel: {
+        currentSelection: vi.fn(() => ({ provider: 'deepseek', model: 'deepseek-chat' })),
+      },
+      attachments: {
+        imageLimits: { maxImagesPerMessage: 4, maxMessageImageBytes: 10_000 },
+        saveImage: vi.fn(),
+      },
+      llm: { resolveModelInfo: vi.fn(async () => ({ inputModalities: ['text'] })) },
+      agentPresets: {
+        resolve: vi.fn(async () => ({ id: 'standard' })),
+        mount: vi.fn(async () => undefined),
+      },
+      agents: {
+        create: vi.fn(async () => ({ agent, dispose: vi.fn(async () => undefined) })),
+        resume: vi.fn(),
+        get: vi.fn(),
+      },
+      get: vi.fn(() => undefined),
+    }
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+
+    const reply = await manager.handle(singleMessage(), noopDownload, (delta) => deltas.push(delta))
+
+    expect(deltas).toEqual([
+      { kind: 'text', text: 'Hel' },
+      { kind: 'text', text: 'lo' },
+      { kind: 'reasoning', text: 'thinking…' },
+    ])
+    expect(reply.text).toBe('Harness reply')
+    expect(reply.reasoning).toBe('thinking…')
+    expect(reply.toolCalls).toEqual([{ name: 'bash', arguments: '{"cmd":"ls"}', ok: true }])
+  })
+
+  it('marks a tool call as failed when the result carries an error', async () => {
+    const agent = makeAgent({
+      stream: [
+        {
+          type: 'tool/call',
+          data: { turn: 1, step: 1, callId: 'c1', name: 'read', arguments: '{"path":"x"}' },
+        },
+        {
+          type: 'tool/result',
+          data: {
+            turn: 1,
+            step: 1,
+            message: { source: { kind: 'tool', callId: 'c1' } },
+            error: { name: 'TOOL_FAILED', code: 'EIO' },
+          },
+        },
+      ],
+    })
+    const ctx = {
+      logger: () => ({ debug() {}, info() {}, warn() {}, error() {} }),
+      sessionPersistence: { list: vi.fn(async () => []) },
+      agentDefaultModel: {
+        currentSelection: vi.fn(() => ({ provider: 'deepseek', model: 'deepseek-chat' })),
+      },
+      attachments: {
+        imageLimits: { maxImagesPerMessage: 4, maxMessageImageBytes: 10_000 },
+        saveImage: vi.fn(),
+      },
+      llm: { resolveModelInfo: vi.fn(async () => ({ inputModalities: ['text'] })) },
+      agentPresets: {
+        resolve: vi.fn(async () => ({ id: 'standard' })),
+        mount: vi.fn(async () => undefined),
+      },
+      agents: {
+        create: vi.fn(async () => ({ agent, dispose: vi.fn(async () => undefined) })),
+        resume: vi.fn(),
+        get: vi.fn(),
+      },
+      get: vi.fn(() => undefined),
+    }
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+
+    const reply = await manager.handle(singleMessage(), noopDownload)
+
+    expect(reply.toolCalls).toEqual([
+      { name: 'read', arguments: '{"path":"x"}', ok: false, error: 'EIO' },
+    ])
+  })
+
+  it('adopts a live session instead of trying to resume it again', async () => {
+    const liveAgent = makeAgent()
+    const resume = vi.fn()
+    const create = vi.fn()
+    const ctx = {
+      logger: () => ({ debug() {}, info() {}, warn() {}, error() {} }),
+      sessionPersistence: { list: vi.fn(async () => []) },
+      agentDefaultModel: {
+        currentSelection: vi.fn(() => ({ provider: 'deepseek', model: 'deepseek-chat' })),
+      },
+      attachments: {
+        imageLimits: { maxImagesPerMessage: 4, maxMessageImageBytes: 10_000 },
+        saveImage: vi.fn(),
+      },
+      llm: { resolveModelInfo: vi.fn(async () => ({ inputModalities: ['text'] })) },
+      agentPresets: {
+        resolve: vi.fn(async () => ({ id: 'standard' })),
+        mount: vi.fn(async () => undefined),
+      },
+      agents: { create, resume, get: vi.fn(() => liveAgent) },
+      get: vi.fn(() => undefined),
+    }
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+
+    const reply = await manager.handle(singleMessage(), noopDownload)
+
+    expect(reply.text).toBe('Harness reply')
+    expect(liveAgent.followup).toHaveBeenCalled()
+    // Resuming would throw "cannot prepare session ... while it is live".
+    expect(resume).not.toHaveBeenCalled()
+    expect(create).not.toHaveBeenCalled()
+    expect(liveAgent.ctx.systemPrompt.section).toHaveBeenCalledWith({
+      name: 'wecom-instructions',
+      order: 50,
+      text: 'WeCom test instructions',
+    })
+  })
+
+  it('re-opens the conversation when its agent was disposed elsewhere', async () => {
+    const { ctx, live } = makeHarness()
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+
+    await manager.handle(singleMessage('one'), noopDownload)
+    expect(live.size).toBe(1)
+
+    // The real owner (e.g. the web UI) disposes the agent: the registry no
+    // longer returns it, and the pool must not drive the stale handle.
+    const [id] = [...live.keys()]
+    live.delete(id ?? '')
+
+    const reply = await manager.handle(singleMessage('two'), noopDownload)
+    expect(reply.text).toBe('Harness reply')
+    expect(ctx.agents.resume).toHaveBeenCalled()
+    expect(live.size).toBe(1)
+  })
+
+  it('starts a fresh session when the conversation id is archived', async () => {
+    const base = conversationId('default', singleMessage())
+    const attached: string[] = []
+    const { ctx, created } = makeHarness()
+    ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+      name === 'workspaceRegistry'
+        ? {
+            archivedSessionIds: [base, `${base}~g1`],
+            create: vi.fn(async () => ({
+              attachSession: vi.fn(async (sessionId: string) => {
+                attached.push(sessionId)
+              }),
+            })),
+          }
+        : undefined,
+    )
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+
+    await manager.handle(singleMessage('one'), noopDownload)
+    expect(created[0]?.sessionId).toBe(`${base}~g2`)
+    expect(attached).toEqual([`${base}~g2`])
+
+    // Later messages keep reusing that visible session.
+    await manager.handle(singleMessage('two'), noopDownload)
+    expect(created).toHaveLength(1)
   })
 })

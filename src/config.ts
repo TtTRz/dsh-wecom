@@ -31,6 +31,14 @@ export interface Config {
   instructions: string
   /** Attach images when the model can view them (`auto`), or force always/never. */
   imageMode: ImageMode
+  /** Stream model text deltas to WeCom as they are produced; `false` sends only the ack + final answer. */
+  streaming: boolean
+  /** Cadence (ms) for flushing accumulated streamed text to WeCom. */
+  streamFlushMs: number
+  /** Append a reasoning/thinking summary to the final reply. */
+  showReasoning: boolean
+  /** Append a tool-call activity summary to the final reply. */
+  showToolCalls: boolean
   connectTimeoutMs: number
   turnTimeoutMs: number
   sendTimeoutMs: number
@@ -68,6 +76,10 @@ export const Config: z<Config> = z.object({
         'indefinitely.',
     ),
   imageMode: z.union(['auto', 'always', 'never']).default('auto'),
+  streaming: z.boolean().default(true),
+  streamFlushMs: z.number().step(1).min(50).max(5_000).default(250),
+  showReasoning: z.boolean().default(true),
+  showToolCalls: z.boolean().default(true),
   connectTimeoutMs: z.number().step(1).min(1).default(30_000),
   turnTimeoutMs: z.number().step(1).min(1).default(300_000),
   sendTimeoutMs: z.number().step(1).min(1).default(30_000),

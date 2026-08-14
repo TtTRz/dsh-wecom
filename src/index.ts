@@ -25,8 +25,13 @@ export {
   saveUploadFile,
 } from './media.js'
 export { containsImageMedia, toContentBlocks } from './message.js'
-export type { Reply } from './pool.js'
-export { registerRestartRoute, registerStatusRoute, type StatusPayload, statusPayload } from './status.js'
+export type { Reply, ToolCallSummary } from './pool.js'
+export {
+  registerRestartRoute,
+  registerStatusRoute,
+  type StatusPayload,
+  statusPayload,
+} from './status.js'
 export type { PluginConfig as ChannelConfig }
 export { Config, WecomChannel }
 

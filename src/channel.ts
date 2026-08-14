@@ -16,7 +16,7 @@ import {
 } from '@wecom/aibot-node-sdk'
 import type { Config } from './config.js'
 import { clipUtf8, Dedupe, timeout } from './helpers.js'
-import { AgentPool } from './pool.js'
+import { AgentPool, type Reply } from './pool.js'
 
 /** The subset of the official SDK this channel calls (kept minimal for test doubles). */
 export interface BotClient {
@@ -68,6 +68,84 @@ export interface ChannelStatusService {
 }
 
 const COMMANDS = new Set(['/bot-ping', '/bot-help', '/bot-status', '/bot-cancel', '/bot-new'])
+
+/**
+ * Assemble one WeCom stream frame from reasoning and visible text. The WeCom
+ * client converts the FIRST `<think>…</think>` block into its native
+ * "思考过程" card, so reasoning rides inside the tag: while only reasoning
+ * exists the tag stays OPEN (the client shows the thinking state); it closes
+ * once visible text arrives or the stream finishes. Nested/foreign think tags
+ * in the model output are stripped so the client always sees exactly one.
+ */
+export function buildStreamContent(
+  reasoningText: string,
+  visibleText: string,
+  finish: boolean,
+): string {
+  const reasoning = reasoningText
+    .replace(/<\s*\/?\s*(?:think(?:ing)?|thought)\b[^<>]*>/gi, '')
+    .trim()
+  const visible = visibleText.trim()
+  if (!reasoning) return visible
+  const think = finish || visible ? `<think>${reasoning}</think>` : `<think>${reasoning}`
+  return visible ? `${think}\n${visible}` : think
+}
+
+/**
+ * Accumulates streamed model deltas (visible text + reasoning) and flushes the
+ * growing full content to WeCom on a throttle. WeCom's stream reply REPLACES
+ * the message content on every frame (same stream id), so each flush sends the
+ * complete accumulated content, never a delta. The final `finish: true` frame
+ * is sent separately by the caller and carries the authoritative reply text.
+ */
+class StreamSink {
+  private text = ''
+  private reasoning = ''
+  private timer: ReturnType<typeof setTimeout> | undefined
+  private lastSent = ''
+
+  constructor(
+    private readonly send: (content: string, finish: boolean) => Promise<void>,
+    private readonly flushMs: number,
+    private readonly limitBytes: number,
+    private readonly onError: (error: unknown) => void,
+  ) {}
+
+  push(kind: 'text' | 'reasoning', delta: string): void {
+    if (!delta) return
+    if (kind === 'reasoning') this.reasoning += delta
+    else this.text += delta
+    if (this.timer === undefined) {
+      this.timer = setTimeout(() => {
+        this.timer = undefined
+        void this.flush(false).catch(this.onError)
+      }, this.flushMs)
+    }
+  }
+
+  async flush(finish: boolean): Promise<void> {
+    if (this.timer !== undefined) {
+      clearTimeout(this.timer)
+      this.timer = undefined
+    }
+    const content = clipUtf8(buildStreamContent(this.reasoning, this.text, finish), this.limitBytes)
+    if (!finish && (content === '' || content === this.lastSent)) return
+    this.lastSent = content
+    await this.send(content, finish)
+  }
+}
+
+/** Truncate to at most `max` characters, keeping the head. */
+function elideHead(value: string, max: number): string {
+  const trimmed = value.trim()
+  return trimmed.length <= max ? trimmed : `${trimmed.slice(0, max)}…`
+}
+
+/** Truncate to at most `max` characters, keeping the tail (most recent reasoning). */
+function elideTail(value: string, max: number): string {
+  const trimmed = value.trim()
+  return trimmed.length <= max ? trimmed : `…${trimmed.slice(trimmed.length - max)}`
+}
 
 /** Owns the WeCom WebSocket and funnels each message into a Harness agent. */
 export class WecomChannel {
@@ -246,17 +324,34 @@ export class WecomChannel {
     }
 
     const streamId = generateReqId('dsh')
+    const sink = this.config.streaming
+      ? new StreamSink(
+          (content, finish) => this.sendStreamBestEffort(frame, streamId, content, finish),
+          this.config.streamFlushMs,
+          this.config.replyLimitBytes,
+          (error) => this.log.error('WeCom stream flush failed: %s', String(error)),
+        )
+      : undefined
     try {
       await this.sendStream(frame, streamId, 'Working…', false)
-      const reply = await this.pool.handle(message, (url, aesKey) =>
-        this.liveClient()
-          .downloadFile(url, aesKey)
-          .then((result) => ({ data: result.buffer, filename: result.filename })),
+      const reply = await this.pool.handle(
+        message,
+        (url, aesKey) =>
+          this.liveClient()
+            .downloadFile(url, aesKey)
+            .then((result) => ({ data: result.buffer, filename: result.filename })),
+        sink
+          ? (delta) => {
+              if (delta.kind === 'reasoning' && !this.config.showReasoning) return
+              sink.push(delta.kind, delta.text)
+            }
+          : undefined,
       )
+      await sink?.flush(false)
       await this.sendStream(
         frame,
         streamId,
-        clipUtf8(reply.text, this.config.replyLimitBytes),
+        clipUtf8(this.renderReply(reply), this.config.replyLimitBytes),
         true,
       )
     } catch (error) {
@@ -352,6 +447,58 @@ export class WecomChannel {
         'WeCom reply send',
       ),
     )
+  }
+
+  /**
+   * Best-effort stream frame for intermediate text: a dropped or failed frame
+   * is fine because the authoritative `finish: true` frame carries everything.
+   */
+  private async sendStreamBestEffort(
+    frame: WsFrameHeaders,
+    streamId: string,
+    content: string,
+    finish: boolean,
+  ): Promise<void> {
+    try {
+      await timeout(
+        this.liveClient().replyStream(frame, streamId, content, finish),
+        this.config.sendTimeoutMs,
+        'WeCom stream reply',
+      )
+    } catch (error) {
+      this.log.error('WeCom stream reply failed: %s', String(error))
+    }
+  }
+
+  /**
+   * The final reply: the native `<think>` card (when reasoning is enabled),
+   * then the answer text, then the tool-call footer. The answer text gets
+   * priority under the WeCom byte cap; think and tool content are budgeted out
+   * of what remains.
+   */
+  private renderReply(reply: Reply): string {
+    const tools = this.renderToolCalls(reply)
+    const toolsBytes = Buffer.byteLength(tools) + (tools ? 4 : 0)
+    const textBudget = Math.max(0, this.config.replyLimitBytes - toolsBytes)
+    const reasoning = this.config.showReasoning ? elideTail(reply.reasoning ?? '', 2_000) : ''
+    const content = buildStreamContent(reasoning, clipUtf8(reply.text, textBudget), true)
+    return tools ? `${content}\n\n${tools}` : content
+  }
+
+  private renderToolCalls(reply: Reply): string {
+    if (
+      !this.config.showToolCalls ||
+      reply.toolCalls === undefined ||
+      reply.toolCalls.length === 0
+    ) {
+      return ''
+    }
+    const lines = reply.toolCalls.map((call) => {
+      const args = elideHead(call.arguments, 120)
+      const status = call.ok ? '' : ` — 失败${call.error ? ` (${call.error})` : ''}`
+      return `- \`${call.name}\`${args ? ` ${args}` : ''}${status}`
+    })
+    return `**🛠 工具调用**\n${lines.join('\n')}`
   }
 
   private async retry<T>(operation: () => Promise<T>): Promise<T> {

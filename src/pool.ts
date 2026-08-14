@@ -14,9 +14,25 @@ import { conversationId, Semaphore, timeout } from './helpers.js'
 import { type MediaPort, safeFilename, saveUploadFile } from './media.js'
 import { containsImageMedia, toContentBlocks } from './message.js'
 
-/** The text one finished turn produced. */
+/** One tool invocation observed during a turn, for the optional activity summary. */
+export interface ToolCallSummary {
+  name: string
+  arguments: string
+  ok: boolean
+  error?: string
+}
+
+/** One streamed model delta: visible answer text or internal reasoning. */
+export interface TurnDelta {
+  kind: 'text' | 'reasoning'
+  text: string
+}
+
+/** The text one finished turn produced, plus optional reasoning/tool activity. */
 export interface Reply {
   text: string
+  reasoning?: string
+  toolCalls?: ToolCallSummary[]
 }
 
 /** Structural face of a workspace entity (absent outside web profiles). */
@@ -175,23 +191,35 @@ export class AgentPool {
     return this.agents.size
   }
 
-  /** Feed one message to its conversation's agent, serialized per conversation. */
-  handle(message: BaseMessage, download: MediaPort['download']): Promise<Reply> {
-    const { id } = this.locate(message)
-    const previous = this.chains.get(id) ?? Promise.resolve()
-    const current = previous.catch(() => undefined).then(() => this.runTurn(id, message, download))
+  /**
+   * Feed one message to its conversation's agent, serialized per conversation.
+   * `onDelta` receives streamed model text and reasoning deltas as they are
+   * produced (for incremental WeCom replies); it is optional and never called
+   * when absent.
+   */
+  handle(
+    message: BaseMessage,
+    download: MediaPort['download'],
+    onDelta?: (delta: TurnDelta) => void,
+  ): Promise<Reply> {
+    const { base, id } = this.locate(message)
+    const target = this.skipArchived(base, id)
+    const previous = this.chains.get(target) ?? Promise.resolve()
+    const current = previous
+      .catch(() => undefined)
+      .then(() => this.runTurn(target, message, download, onDelta))
     // `.then(onFul, onRej)` — never `.finally()` — so `marker` stays resolved
     // and its rejection is not leaked as an unhandled rejection when `current`
     // rejects (e.g. a response timeout). `marker` is only a queue position.
     const marker = current.then(
       () => {
-        if (this.chains.get(id) === marker) this.chains.delete(id)
+        if (this.chains.get(target) === marker) this.chains.delete(target)
       },
       () => {
-        if (this.chains.get(id) === marker) this.chains.delete(id)
+        if (this.chains.get(target) === marker) this.chains.delete(target)
       },
     )
-    this.chains.set(id, marker)
+    this.chains.set(target, marker)
     return current
   }
 
@@ -232,10 +260,41 @@ export class AgentPool {
     return epoch === 0 ? base : `${base}~g${epoch}`
   }
 
+  /**
+   * An archived session stays hidden in the web UI even when WeCom activity
+   * resumes it, and the harness has no unarchive API — so skip archived ids by
+   * bumping the conversation epoch until the candidate is visible again. The
+   * fresh session appears in the sidebar once the first message lands.
+   */
+  private skipArchived(base: string, id: string): string {
+    let candidate = id
+    let epoch = this.epochs.get(base) ?? 0
+    while (this.isArchived(candidate)) {
+      epoch += 1
+      candidate = this.withEpoch(base, epoch)
+    }
+    if (candidate !== id) this.epochs.set(base, epoch)
+    return candidate
+  }
+
+  private isArchived(id: string): boolean {
+    try {
+      const registry = this.ctx.get('workspaceRegistry') as
+        | { archivedSessionIds?: readonly string[] }
+        | undefined
+      return registry?.archivedSessionIds?.includes(id) ?? false
+    } catch {
+      // The workspace service may not be mounted (or its state not yet
+      // initialized); treat the session as visible rather than failing.
+      return false
+    }
+  }
+
   private async runTurn(
     id: string,
     message: BaseMessage,
     download: MediaPort['download'],
+    onDelta?: (delta: TurnDelta) => void,
   ): Promise<Reply> {
     const handle = await this.ensureAgent(id)
     const agent = handle.agent
@@ -246,11 +305,49 @@ export class AgentPool {
     const release = await this.semaphore.acquire()
     try {
       const start = agent.session.events.length
-      const includeImages = containsImageMedia(message) ? await this.canViewImages(agent) : false
-      const content = await toContentBlocks(message, this.mediaPort(download), includeImages)
-      agent.followup(createUserMessage({ content, source: { kind: 'user' } }))
-      await this.settleTurn(agent)
-      return this.extractText(agent.session.events.slice(start))
+      const reasoning: string[] = []
+      const pendingCalls = new Map<string, { name: string; arguments: string }>()
+      const toolCalls: ToolCallSummary[] = []
+      // Observe this agent's session firehose for the duration of the turn:
+      // forward text deltas for streaming and collect reasoning + tool activity
+      // for the optional final summary. Scoped to the agent, so we see only its
+      // events and the listener is torn down with `off()` after the turn.
+      const off = agent.ctx.on('session/event', (_session, event: SessionEvent) => {
+        if (event.type === 'assistant/chunk') {
+          const chunk = event.data.chunk
+          if (chunk.type === 'text-delta' && chunk.text) {
+            onDelta?.({ kind: 'text', text: chunk.text })
+          } else if (chunk.type === 'reasoning-delta' && chunk.text) {
+            reasoning.push(chunk.text)
+            onDelta?.({ kind: 'reasoning', text: chunk.text })
+          }
+        } else if (event.type === 'tool/call') {
+          pendingCalls.set(event.data.callId, {
+            name: event.data.name,
+            arguments: event.data.arguments,
+          })
+        } else if (event.type === 'tool/result') {
+          const call = pendingCalls.get(event.data.message.source.callId)
+          toolCalls.push({
+            name: call?.name ?? event.data.message.source.callId,
+            arguments: call?.arguments ?? '',
+            ok: event.data.error === undefined,
+            error: event.data.error?.code,
+          })
+        }
+      })
+      try {
+        const includeImages = containsImageMedia(message) ? await this.canViewImages(agent) : false
+        const content = await toContentBlocks(message, this.mediaPort(download), includeImages)
+        agent.followup(createUserMessage({ content, source: { kind: 'user' } }))
+        await this.settleTurn(agent)
+      } finally {
+        off()
+      }
+      const reply = this.extractText(agent.session.events.slice(start))
+      if (reasoning.length > 0) reply.reasoning = reasoning.join('')
+      if (toolCalls.length > 0) reply.toolCalls = toolCalls
+      return reply
     } finally {
       release()
     }
@@ -269,7 +366,12 @@ export class AgentPool {
 
   private async ensureAgent(id: string): Promise<AgentHandle> {
     const existing = this.agents.get(id)
-    if (existing !== undefined) return existing
+    if (existing !== undefined) {
+      // The tracked agent may have been disposed by its real owner (e.g. the
+      // user closed the session in the web UI); drop stale entries and re-open.
+      if (this.ctx.agents.get(SessionId(id)) === existing.agent) return existing
+      this.agents.delete(id)
+    }
     const pending = this.pending.get(id)
     if (pending !== undefined) return pending
 
@@ -282,6 +384,18 @@ export class AgentPool {
 
   private async openAgent(id: string): Promise<AgentHandle> {
     const sessionId = SessionId(id)
+    // The session can already be live — e.g. the user opened this conversation
+    // in the web UI, which resumes the persisted session. Preparing it a second
+    // time throws "cannot prepare session ... while it is live", so adopt the
+    // live agent instead of fighting for the session. It was resumed with the
+    // same stored preset, so it answers WeCom messages identically. We don't
+    // own it: disposal is a no-op so the UI keeps its session.
+    const live = this.ctx.agents.get(sessionId)
+    if (live !== undefined) {
+      this.mountWecomInstructions(live)
+      return { agent: live, dispose: async () => undefined }
+    }
+
     const agentOptions = this.modelOptions()
     const resolvedPreset = (await this.ctx.agentPresets.resolve(this.config.preset)).id
     const setup = this.mountPreset(resolvedPreset)
@@ -305,6 +419,24 @@ export class AgentPool {
     this.persisted.add(id)
     await this.groupSession(id)
     return handle
+  }
+
+  /**
+   * Mount the WeCom instruction section on an agent we adopted from elsewhere
+   * (the web UI resume mounts the stored preset but not this section). The
+   * registration throws on a duplicate name, which simply means we adopted
+   * this agent before — the section is already in place.
+   */
+  private mountWecomInstructions(agent: Agent): void {
+    try {
+      agent.ctx.systemPrompt.section({
+        name: 'wecom-instructions',
+        order: 50,
+        text: this.config.instructions,
+      })
+    } catch (error) {
+      this.log.debug('WeCom instruction section already registered: %s', String(error))
+    }
   }
 
   private mountPreset(presetId: string): AgentSetup {

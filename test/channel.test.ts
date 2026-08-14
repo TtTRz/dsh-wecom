@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
-import { type BotClient, WecomChannel } from '../src/channel.js'
+import { type BotClient, buildStreamContent, WecomChannel } from '../src/channel.js'
 import { testConfig } from './test-config.js'
 
 function makeClient() {
-  const handlers = new Map<string, (...args: unknown[]) => void>()
+  const handlers = new Map<string, (...args: unknown[]) => unknown>()
   const client = {
     isConnected: false,
-    on(event: string, handler: (...args: unknown[]) => void) {
+    on(event: string, handler: (...args: unknown[]) => unknown) {
       handlers.set(event, handler)
       return client
     },
@@ -24,8 +24,8 @@ function makeClient() {
     downloadFile: vi.fn(async () => ({ buffer: new Uint8Array() })),
   }
   const botClient = client as unknown as BotClient
-  const fire = (event: string, ...args: unknown[]): void => {
-    handlers.get(event)?.(...args)
+  const fire = (event: string, ...args: unknown[]): unknown => {
+    return handlers.get(event)?.(...args)
   }
   return { client: botClient, fire }
 }
@@ -115,5 +115,201 @@ describe('WecomChannel status', () => {
     ;(client as { isConnected: boolean }).isConnected = true
     channel.reconnect()
     expect((client as { isConnected: boolean }).isConnected).toBe(true)
+  })
+})
+
+describe('WecomChannel streaming', () => {
+  function makeStreamingSetup(stream: unknown[], replyText: string) {
+    const events: unknown[] = []
+    const sessionHandlers = new Map<string, Set<(...args: unknown[]) => void>>()
+    const fireAgent = (event: string, ...args: unknown[]): void => {
+      for (const handler of sessionHandlers.get(event) ?? []) handler(...args)
+    }
+    const agent = {
+      status: 'idle',
+      options: { provider: 'p', model: 'm' },
+      session: { events },
+      ctx: {
+        on: (event: string, handler: (...args: unknown[]) => void) => {
+          const set = sessionHandlers.get(event) ?? new Set<(...args: unknown[]) => void>()
+          set.add(handler)
+          sessionHandlers.set(event, set)
+          return () => set.delete(handler)
+        },
+      },
+      cancel: () => undefined,
+      followup: () => {
+        agent.status = 'running'
+        for (const event of stream) {
+          events.push(event)
+          fireAgent('session/event', agent.session, event)
+        }
+        events.push({
+          type: 'assistant/message',
+          data: { message: { content: [{ type: 'text', text: replyText }] } },
+        })
+        events.push({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
+      },
+      whenIdle: () => {
+        agent.status = 'idle'
+        return Promise.resolve()
+      },
+    }
+    const ctx = {
+      logger: () => ({ debug() {}, info() {}, warn() {}, error() {} }),
+      sessionPersistence: { list: vi.fn(async () => []) },
+      credentials: { resolve: vi.fn(async () => ({ value: 'secret' })) },
+      agentDefaultModel: { currentSelection: vi.fn(() => ({ provider: 'p', model: 'm' })) },
+      attachments: {
+        imageLimits: { maxImagesPerMessage: 4, maxMessageImageBytes: 10_000 },
+        saveImage: vi.fn(),
+      },
+      llm: { resolveModelInfo: vi.fn(async () => ({ inputModalities: ['text'] })) },
+      agentPresets: {
+        resolve: vi.fn(async () => ({ id: 'standard' })),
+        mount: vi.fn(async () => undefined),
+      },
+      agents: {
+        create: vi.fn(
+          async (options: { sessionId: string; setup?: (agentCtx: unknown) => Promise<void> }) => {
+            if (options.setup) await options.setup({ systemPrompt: { section() {} } })
+            return { agent, dispose: vi.fn(async () => undefined) }
+          },
+        ),
+        resume: vi.fn(),
+        get: vi.fn(),
+      },
+      get: vi.fn(() => undefined),
+    }
+    return ctx
+  }
+
+  async function runStreamingMessage(stream: unknown[], replyText: string): Promise<unknown[][]> {
+    const { client, fire } = makeClient()
+    const channel = new WecomChannel(
+      makeStreamingSetup(stream, replyText) as never,
+      testConfig({ streamFlushMs: 5_000 }),
+      () => client,
+    )
+    await channel.start()
+    await fire('message', {
+      headers: { req_id: 'r1' },
+      body: {
+        msgid: 'm1',
+        aibotid: 'bot',
+        chattype: 'single',
+        from: { userid: 'u1' },
+        msgtype: 'text',
+        text: { content: 'hi' },
+      },
+    })
+    return (client as unknown as { replyStream: ReturnType<typeof vi.fn> }).replyStream.mock.calls
+  }
+
+  it('streams text deltas and appends the tool-call summary to the final frame', async () => {
+    const calls = await runStreamingMessage(
+      [
+        {
+          type: 'assistant/chunk',
+          data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'Hello' } },
+        },
+        {
+          type: 'tool/call',
+          data: { turn: 1, step: 1, callId: 'c1', name: 'read', arguments: '{"path":"a"}' },
+        },
+        {
+          type: 'tool/result',
+          data: { turn: 1, step: 1, message: { source: { kind: 'tool', callId: 'c1' } } },
+        },
+      ],
+      'Hello',
+    )
+
+    expect(calls).toHaveLength(3)
+    expect(calls[0]?.[2]).toBe('Working…')
+    expect(calls[0]?.[3]).toBe(false)
+    expect(calls[1]?.[2]).toBe('Hello')
+    expect(calls[1]?.[3]).toBe(false)
+    const final = calls[2]
+    expect(final?.[3]).toBe(true)
+    expect(String(final?.[2])).toContain('Hello')
+    expect(String(final?.[2])).toContain('工具调用')
+    expect(String(final?.[2])).toContain('read')
+    expect(String(final?.[2])).not.toContain('<think>')
+  })
+
+  it('wraps reasoning in a native <think> block ahead of the answer', async () => {
+    const calls = await runStreamingMessage(
+      [
+        {
+          type: 'assistant/chunk',
+          data: {
+            turn: 1,
+            step: 1,
+            chunk: { type: 'reasoning-delta', index: 1, text: 'thinking…' },
+          },
+        },
+        {
+          type: 'assistant/chunk',
+          data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'Hi' } },
+        },
+      ],
+      'Hi',
+    )
+
+    const final = calls[2]
+    expect(final?.[3]).toBe(true)
+    expect(String(final?.[2])).toBe('<think>thinking…</think>\nHi')
+    // Intermediate stream frames carry the think block too, so the client can
+    // render its thinking card while the answer is still streaming.
+    expect(calls[1]?.[2]).toBe('<think>thinking…</think>\nHi')
+    expect(calls[1]?.[3]).toBe(false)
+  })
+
+  it('strips nested think tags so the client sees a single block', async () => {
+    const calls = await runStreamingMessage(
+      [
+        {
+          type: 'assistant/chunk',
+          data: {
+            turn: 1,
+            step: 1,
+            chunk: { type: 'reasoning-delta', index: 1, text: 'a<think>b</think>c' },
+          },
+        },
+        {
+          type: 'assistant/chunk',
+          data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'Hi' } },
+        },
+      ],
+      'Hi',
+    )
+
+    const final = calls[2]
+    expect(String(final?.[2])).toBe('<think>abc</think>\nHi')
+  })
+})
+
+describe('buildStreamContent', () => {
+  it('leaves the think tag open while only reasoning exists', () => {
+    expect(buildStreamContent('still thinking…', '', false)).toBe('<think>still thinking…')
+  })
+
+  it('closes the think block once visible text arrives', () => {
+    expect(buildStreamContent('thinking…', 'Hi', false)).toBe('<think>thinking…</think>\nHi')
+  })
+
+  it('closes the think block when the stream finishes without visible text', () => {
+    expect(buildStreamContent('thinking…', '', true)).toBe('<think>thinking…</think>')
+  })
+
+  it('returns only the visible text when there is no reasoning', () => {
+    expect(buildStreamContent('', 'Hi', false)).toBe('Hi')
+  })
+
+  it('strips nested and foreign think variants', () => {
+    expect(buildStreamContent('a<think>b</think>c<thinking>d</thinking>', 'Hi', true)).toBe(
+      '<think>abcd</think>\nHi',
+    )
   })
 })

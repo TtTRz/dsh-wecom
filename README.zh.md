@@ -92,6 +92,10 @@ export WECOM_BOT_ID='你的 BotID'
 | `groupAllowlist` | `[]` | 群聊 chatid 白名单 |
 | `instructions` | 企业聊天引导语 | 每轮叠加在人设上的指令段 |
 | `imageMode` | `auto` | 模型支持看图就挂附件；`always` / `never` 强制开关 |
+| `streaming` | `true` | 逐 token 流式回复；`false` 则只发 ack + 最终全文 |
+| `streamFlushMs` | `250` | 流式文本刷新间隔（毫秒） |
+| `showReasoning` | `true` | 思考内容放进企微原生 `<think>` 卡片（可折叠的「思考过程」） |
+| `showToolCalls` | `true` | 最终答复附工具调用摘要 |
 | `maxConcurrent` | `4` | 全局并发 turn 上限 |
 | `turnTimeoutMs` | `300000` | 单轮超时（超时会取消该 turn） |
 
