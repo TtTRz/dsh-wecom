@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-08-15
+
+### Changed
+
+- Package metadata: added the `author` field (`TtTRz <romc1224@gmail.com>`) so npm surfaces the correct author on the registry page instead of the publishing account.
+
 ## [0.1.2] - 2026-08-15
 
 ### Added
