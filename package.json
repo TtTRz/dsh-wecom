@@ -10,6 +10,10 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./client": {
+      "types": "./dist/client.d.cts",
+      "default": "./dist/client.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -22,10 +26,14 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
     }
   },
   "scripts": {
-    "build": "tsup src/index.ts --format esm --dts --clean --sourcemap",
+    "build": "tsup && node scripts/wrap-client.mjs dist/client.cjs dist/client.js dsh-wecom",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "lint": "biome check .",
@@ -69,7 +77,8 @@
     "@deepseek-ai/dsh-llm": ">=0.1.0-rc.6",
     "@deepseek-ai/dsh-session": ">=0.1.0-rc.6",
     "@deepseek-ai/dsh-session-persistence": ">=0.1.0-rc.6",
-    "@deepseek-ai/dsh-system-prompt": ">=0.1.0-rc.6"
+    "@deepseek-ai/dsh-system-prompt": ">=0.1.0-rc.6",
+    "react": "^18.2.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.8",
@@ -90,6 +99,8 @@
     "@deepseek-ai/dsh-timeout": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-typert-protocol": "^0.1.0-rc.6",
     "@types/node": "^24.3.0",
+    "@types/react": "~18.3.1",
+    "react": "^18.2.0",
     "tsup": "^8.5.0",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"

@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { type ChannelStatusService, WecomChannel } from './channel.js'
 import { Config, type Config as PluginConfig } from './config.js'
+import { registerStatusRoute } from './status.js'
 
 export const name = 'dsh-wecom'
 export const inject = [
@@ -23,6 +24,7 @@ export {
 } from './media.js'
 export { containsImageMedia, toContentBlocks } from './message.js'
 export type { Reply } from './pool.js'
+export { registerStatusRoute, type StatusPayload, statusPayload } from './status.js'
 export type { PluginConfig as ChannelConfig }
 export { Config, WecomChannel }
 
@@ -33,6 +35,8 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
   // without reaching into channel internals. Scoped to this plugin's fiber.
   const status: ChannelStatusService = { snapshot: () => channel.snapshot() }
   ctx.provide('wecomChannelStatus', status)
+  // Browser UI + dashboards: `GET /api/wecom/status` (a no-op without a web server).
+  ctx.effect(() => registerStatusRoute(ctx, () => channel.snapshot()), 'dsh-wecom.status-route')
   await ctx.effect(async function* () {
     yield async () => channel.stop()
     await channel.start()

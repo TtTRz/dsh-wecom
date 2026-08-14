@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Host-wide `wecomChannelStatus` service exposing a scalar-only `snapshot()`
+  (`connected`, `stopping`, `conversations`, `authenticatedAt`, `lastError`).
+- `GET /api/wecom/status` route (registered only when a web server is present)
+  serving the JSON status payload for dashboards and the bundled browser UI.
+- Browser client half (`dsh.client`, served as `/plugins/dsh-wecom/client.js`):
+  a WeCom status action with a connection dot in the sidebar foot and a
+  floating status panel over `shell.overlay`, polling the status route.
 - Initial WeCom AI Bot long-connection channel plugin for DeepSeek Harness.
 - Per-conversation persistent agents with a mounted `preset` (default `standard`).
 - Persistent `systemPrompt.section` instructions layered on the persona.

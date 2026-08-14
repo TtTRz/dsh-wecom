@@ -118,6 +118,19 @@ const health = status.snapshot()
 
 `snapshot()` 只返回纯标量字段，可以安全地放进 RPC 或 JSON。
 
+## 浏览器界面
+
+本包自带浏览器客户端半端（通过 `dsh.client` 声明，由 web profile 以
+`/plugins/dsh-wecom/client.js` 下发，无需重建前端）。它提供：
+
+- **侧边栏底部的 WeCom 动作按钮**，带实时连接状态点；
+- 点击打开的**悬浮状态面板**（连接状态、会话数、认证时长、最近错误），
+  每五秒轮询一次。
+
+两者都消费主机半端注册的 `GET /api/wecom/status` JSON 路由（存在 web server
+时才注册）。客户端半端构建为 CommonJS 后，由 `scripts/wrap-client.mjs` 包装成
+web 模块加载器执行的 factory 形式。
+
 ## 开发
 
 ```sh

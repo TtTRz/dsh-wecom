@@ -117,6 +117,20 @@ const health = status.snapshot()
 
 `snapshot()` returns plain scalars only — safe to serialize into RPC or JSON.
 
+## Browser UI
+
+The package ships a browser client half (declared via `dsh.client` and served
+by the web profile as `/plugins/dsh-wecom/client.js` — no frontend rebuild
+needed). It adds:
+
+- a **WeCom action in the sidebar foot** with a live connection dot, and
+- a **floating status panel** (connection, conversation count, authentication
+  age, last error) that opens from the action and polls every five seconds.
+
+Both consume `GET /api/wecom/status`, the JSON route the host half registers
+when a web server is present. The client half is built to CommonJS and wrapped
+by `scripts/wrap-client.mjs` into the factory form the web module loader runs.
+
 ## Development
 
 ```sh
