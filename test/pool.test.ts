@@ -282,4 +282,44 @@ describe('AgentPool', () => {
       text: 'Harness reply',
     })
   })
+
+  it('titles an untitled conversation once, from its first message', async () => {
+    const renamed: string[] = []
+    let titled = false
+    const { ctx } = makeHarness()
+    ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) => {
+      if (name === 'sessionTitle') {
+        return {
+          get: vi.fn(() => (titled ? { title: 'x' } : undefined)),
+          rename: vi.fn((_session: unknown, title: string) => {
+            renamed.push(title)
+            titled = true
+          }),
+        }
+      }
+      return undefined
+    })
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+    await manager.handle(singleMessage('hello world'), noopDownload)
+    await manager.handle(singleMessage('second message'), noopDownload)
+    expect(renamed).toEqual(['hello world'])
+  })
+
+  it('clips long titles to a compact one-liner', async () => {
+    const renamed: string[] = []
+    const { ctx } = makeHarness()
+    ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+      name === 'sessionTitle'
+        ? {
+            get: vi.fn(() => undefined),
+            rename: vi.fn((_session: unknown, title: string) => renamed.push(title)),
+          }
+        : undefined,
+    )
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+    await manager.handle(singleMessage('x'.repeat(120)), noopDownload)
+    expect(renamed).toEqual([`${'x'.repeat(59)}…`])
+  })
 })

@@ -27,6 +27,15 @@ interface WorkspaceRegistryLike {
   create(path: string, title?: string): Promise<WorkspaceLike>
 }
 
+/** Structural face of the optional `sessionTitle` service. */
+interface SessionTitleLike {
+  get(session: unknown): unknown
+  rename(session: unknown, title: string): unknown
+}
+
+/** Upper bound for auto-generated conversation titles. */
+const TITLE_MAX_LENGTH = 60
+
 /**
  * One Harness agent per WeCom conversation: opened on first use, resumed from
  * persistence after restarts, and closed with the plugin. Each agent mounts a
@@ -126,6 +135,41 @@ export class AgentPool {
     }
   }
 
+  /** First plain-text fragment of an inbound message, for session titling. */
+  private firstTextOf(message: BaseMessage): string {
+    if (message.msgtype === 'text') return message.text?.content ?? ''
+    if (message.msgtype === 'mixed') {
+      const mixed = message.mixed as
+        | { msg_item?: Array<{ msgtype?: string; text?: { content?: string } }> }
+        | undefined
+      for (const item of mixed?.msg_item ?? []) {
+        if (item.msgtype === 'text' && item.text?.content) return item.text.content
+      }
+    }
+    return ''
+  }
+
+  /**
+   * Name a still-untitled conversation from its first message. The web
+   * sidebar hides titleless sessions (only the currently open one shows), so
+   * this runs on creation and again on resume for pre-title era sessions.
+   * Best-effort: a missing service or rename failure never fails the turn.
+   */
+  private async titleSession(agent: Agent, message: BaseMessage): Promise<void> {
+    const sessionTitle = this.ctx.get('sessionTitle') as SessionTitleLike | undefined
+    if (sessionTitle === undefined) return
+    const session = agent.session
+    if (sessionTitle.get(session) !== undefined) return
+    const raw = this.firstTextOf(message).replace(/\s+/g, ' ').trim()
+    if (raw === '') return
+    const title = raw.length <= TITLE_MAX_LENGTH ? raw : `${raw.slice(0, TITLE_MAX_LENGTH - 1)}…`
+    try {
+      sessionTitle.rename(session, title)
+    } catch (error) {
+      this.log.error('WeCom session title failed: %s', String(error))
+    }
+  }
+
   /** Number of live conversation agents currently held. */
   size(): number {
     return this.agents.size
@@ -195,6 +239,10 @@ export class AgentPool {
   ): Promise<Reply> {
     const handle = await this.ensureAgent(id)
     const agent = handle.agent
+    // The web sidebar hides titleless sessions (only the current one shows),
+    // so name the conversation from its first message — on creation and again
+    // on resume when a pre-title era session is still blank.
+    await this.titleSession(agent, message)
     const release = await this.semaphore.acquire()
     try {
       const start = agent.session.events.length
