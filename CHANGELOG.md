@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-08-15
+
+### Changed
+
+- Tool-call activity is now rendered as a compact list inside the native
+  `<think>` card (arguments previewed from their most informative field)
+  instead of a markdown footer in the reply body, keeping the visible answer
+  clean.
+
 ## [0.1.3] - 2026-08-15
 
 ### Changed

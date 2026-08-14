@@ -147,6 +147,28 @@ function elideTail(value: string, max: number): string {
   return trimmed.length <= max ? trimmed : `…${trimmed.slice(trimmed.length - max)}`
 }
 
+/**
+ * A compact, readable preview of one tool call's arguments: the most
+ * informative scalar field when the JSON parses, otherwise the raw string,
+ * flattened and truncated.
+ */
+function toolArgPreview(argumentsJson: string, max: number): string {
+  let value = ''
+  try {
+    const parsed = JSON.parse(argumentsJson) as Record<string, unknown>
+    for (const key of ['command', 'file_path', 'path', 'name', 'query', 'text']) {
+      const candidate = parsed[key]
+      if (typeof candidate === 'string' && candidate.trim()) {
+        value = candidate
+        break
+      }
+    }
+  } catch {
+    // Not JSON — fall back to the raw string below.
+  }
+  return elideHead((value || argumentsJson).replace(/\s+/g, ' '), max)
+}
+
 /** Owns the WeCom WebSocket and funnels each message into a Harness agent. */
 export class WecomChannel {
   private readonly log
@@ -478,18 +500,32 @@ export class WecomChannel {
   }
 
   /**
-   * The final reply: the native `<think>` card (when reasoning is enabled),
-   * then the answer text, then the tool-call footer. The answer text gets
-   * priority under the WeCom byte cap; think and tool content are budgeted out
-   * of what remains.
+   * The final reply: the native `<think>` card carrying the whole process
+   * (reasoning plus tool-call activity), then the clean answer text. The
+   * answer gets priority under the WeCom byte cap; the process content is
+   * budgeted out of what remains.
    */
   private renderReply(reply: Reply): string {
+    const process = this.renderProcess(reply)
+    const processBytes = Buffer.byteLength(process) + 16
+    const textBudget = Math.max(0, this.config.replyLimitBytes - processBytes)
+    return buildStreamContent(process, clipUtf8(reply.text, textBudget), true)
+  }
+
+  /**
+   * Everything that belongs inside the think card: the model reasoning and a
+   * compact tool-call activity list. WeCom has no native tool-call element, so
+   * tool activity rides inside the think block instead of polluting the reply
+   * body.
+   */
+  private renderProcess(reply: Reply): string {
+    const parts: string[] = []
+    if (this.config.showReasoning && reply.reasoning) {
+      parts.push(elideTail(reply.reasoning, 2_000))
+    }
     const tools = this.renderToolCalls(reply)
-    const toolsBytes = Buffer.byteLength(tools) + (tools ? 4 : 0)
-    const textBudget = Math.max(0, this.config.replyLimitBytes - toolsBytes)
-    const reasoning = this.config.showReasoning ? elideTail(reply.reasoning ?? '', 2_000) : ''
-    const content = buildStreamContent(reasoning, clipUtf8(reply.text, textBudget), true)
-    return tools ? `${content}\n\n${tools}` : content
+    if (tools !== '') parts.push(tools)
+    return parts.join('\n\n')
   }
 
   private renderToolCalls(reply: Reply): string {
@@ -501,11 +537,11 @@ export class WecomChannel {
       return ''
     }
     const lines = reply.toolCalls.map((call) => {
-      const args = elideHead(call.arguments, 120)
-      const status = call.ok ? '' : ` — 失败${call.error ? ` (${call.error})` : ''}`
-      return `- \`${call.name}\`${args ? ` ${args}` : ''}${status}`
+      const args = toolArgPreview(call.arguments, 80)
+      const status = call.ok ? '' : ` (失败${call.error ? `: ${call.error}` : ''})`
+      return `- ${call.name}${args ? `: ${args}` : ''}${status}`
     })
-    return `**🛠 工具调用**\n${lines.join('\n')}`
+    return `工具调用:\n${lines.join('\n')}`
   }
 
   private async retry<T>(operation: () => Promise<T>): Promise<T> {

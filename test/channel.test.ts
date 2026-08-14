@@ -206,7 +206,7 @@ describe('WecomChannel streaming', () => {
     return (client as unknown as { replyStream: ReturnType<typeof vi.fn> }).replyStream.mock.calls
   }
 
-  it('streams text deltas and appends the tool-call summary to the final frame', async () => {
+  it('streams text deltas and tucks the tool-call list inside the think block', async () => {
     const calls = await runStreamingMessage(
       [
         {
@@ -228,14 +228,43 @@ describe('WecomChannel streaming', () => {
     expect(calls).toHaveLength(3)
     expect(calls[0]?.[2]).toBe('Working…')
     expect(calls[0]?.[3]).toBe(false)
+    // Intermediate frames carry only the visible answer (no tools yet).
     expect(calls[1]?.[2]).toBe('Hello')
     expect(calls[1]?.[3]).toBe(false)
     const final = calls[2]
     expect(final?.[3]).toBe(true)
-    expect(String(final?.[2])).toContain('Hello')
-    expect(String(final?.[2])).toContain('工具调用')
-    expect(String(final?.[2])).toContain('read')
-    expect(String(final?.[2])).not.toContain('<think>')
+    expect(String(final?.[2])).toBe('<think>工具调用:\n- read: a</think>\nHello')
+  })
+
+  it('combines reasoning and tool calls inside one think block', async () => {
+    const calls = await runStreamingMessage(
+      [
+        {
+          type: 'assistant/chunk',
+          data: {
+            turn: 1,
+            step: 1,
+            chunk: { type: 'reasoning-delta', index: 1, text: 'thinking…' },
+          },
+        },
+        {
+          type: 'tool/call',
+          data: { turn: 1, step: 1, callId: 'c1', name: 'bash', arguments: '{"command":"ls"}' },
+        },
+        {
+          type: 'tool/result',
+          data: { turn: 1, step: 1, message: { source: { kind: 'tool', callId: 'c1' } } },
+        },
+        {
+          type: 'assistant/chunk',
+          data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'Hi' } },
+        },
+      ],
+      'Hi',
+    )
+
+    const final = calls[2]
+    expect(String(final?.[2])).toBe('<think>thinking…\n\n工具调用:\n- bash: ls</think>\nHi')
   })
 
   it('wraps reasoning in a native <think> block ahead of the answer', async () => {
