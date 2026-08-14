@@ -39,7 +39,7 @@ export class AgentPool {
   private readonly epochs = new Map<string, number>()
   private readonly semaphore: Semaphore
   private persisted = new Set<string>()
-  private workspace: WorkspaceLike | undefined
+  private workspacePromise: Promise<WorkspaceLike | undefined> | undefined
 
   constructor(
     private readonly ctx: Context,
@@ -49,18 +49,62 @@ export class AgentPool {
   }
 
   /**
-   * Load persisted session ids, make sure the agent cwd exists, and claim the
-   * workspace that groups every WeCom conversation in the web sidebar.
+   * Load persisted session ids, make sure the agent cwd exists, and try to
+   * claim the grouping workspace. The workspace registry may not be mounted
+   * yet while this plugin activates, so retry briefly here; the lazy path in
+   * `groupSession` covers any later first message regardless.
    */
   async start(): Promise<void> {
     const headers = await this.ctx.sessionPersistence.list()
     this.persisted = new Set(headers.map((header) => String(header.id)))
     await mkdir(this.config.cwd, { recursive: true })
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        if ((await this.ensureWorkspace()) !== undefined) return
+      } catch {
+        // Transient registry race; retried below and lazily per message.
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+  }
+
+  /**
+   * Resolve the grouping workspace once. Failures (including a not-yet-mounted
+   * registry) are forgotten so the next call retries instead of caching the
+   * miss forever.
+   */
+  private ensureWorkspace(): Promise<WorkspaceLike | undefined> {
+    if (this.workspacePromise !== undefined) return this.workspacePromise
+    const current = this.openWorkspace().then(
+      (workspace) => {
+        if (workspace === undefined) this.forgetWorkspace(current)
+        return workspace
+      },
+      (error) => {
+        this.forgetWorkspace(current)
+        throw error
+      },
+    )
+    this.workspacePromise = current
+    return current
+  }
+
+  private forgetWorkspace(current: Promise<WorkspaceLike | undefined>): void {
+    if (this.workspacePromise === current) this.workspacePromise = undefined
+  }
+
+  private async openWorkspace(): Promise<WorkspaceLike | undefined> {
     const registry = this.ctx.get('workspaceRegistry') as WorkspaceRegistryLike | undefined
-    if (registry === undefined) return
+    if (registry === undefined) return undefined
     // Workspace membership is validated by canonical cwd, so the workspace
     // owns `cwd` itself and every agent runs there.
-    this.workspace = await registry.create(this.config.cwd, this.config.workspaceTitle)
+    return registry.create(this.config.cwd, this.config.workspaceTitle)
+  }
+
+  /** Add one conversation session to the grouping workspace, when claimed. */
+  private async groupSession(id: string): Promise<void> {
+    const workspace = await this.ensureWorkspace()
+    await workspace?.addSession(id)
   }
 
   /** Number of live conversation agents currently held. */
@@ -181,7 +225,7 @@ export class AgentPool {
         agentOptions,
         setup,
       })
-      await this.workspace?.addSession(id)
+      await this.groupSession(id)
       return handle
     }
 
@@ -192,7 +236,7 @@ export class AgentPool {
       setup,
     })
     this.persisted.add(id)
-    await this.workspace?.addSession(id)
+    await this.groupSession(id)
     return handle
   }
 

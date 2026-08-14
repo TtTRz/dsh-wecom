@@ -218,4 +218,27 @@ describe('AgentPool', () => {
     const manager = new AgentPool(ctx as never, testConfig())
     await expect(manager.start()).resolves.toBeUndefined()
   })
+
+  it('creates the workspace lazily when the registry appears after startup', async () => {
+    const added: string[] = []
+    const create = vi.fn(async (path: string, title: string) => ({
+      addSession: vi.fn(async (sessionId: string) => {
+        added.push(sessionId)
+      }),
+      path,
+      title,
+    }))
+    const { ctx, created } = makeHarness()
+    const get = ctx.get as ReturnType<typeof vi.fn>
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+    expect(create).not.toHaveBeenCalled()
+
+    get.mockImplementation((name: string) =>
+      name === 'workspaceRegistry' ? { create } : undefined,
+    )
+    await manager.handle(singleMessage('one'), noopDownload)
+    expect(create).toHaveBeenCalledWith('/tmp/wecom-test', 'WeCom')
+    expect(added).toEqual([created[0]?.sessionId])
+  })
 })
