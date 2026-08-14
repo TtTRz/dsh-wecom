@@ -142,3 +142,33 @@ export function registerStatusRoute(ctx: Context, snapshot: () => ChannelStatus)
     },
   })
 }
+
+/**
+ * Serve `POST /api/wecom/restart` — force the long connection to reconnect
+ * now (e.g. after credential rotation or a stuck socket). The `restart`
+ * callback drops the current socket and wakes the owning reconnect loop;
+ * it never shuts the bot down. Registering is optional: in profiles without
+ * a web server this is a no-op disposer.
+ */
+export function registerRestartRoute(ctx: Context, restart: () => void): () => void {
+  const webServer = ctx.get('webServer') as WebServerLike | undefined
+  if (webServer === undefined) return () => undefined
+  return webServer.register({
+    kind: 'exact',
+    path: '/api/wecom/restart',
+    handler: (_req, res) => {
+      const send = (status: number, body: unknown): void => {
+        res.statusCode = status
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.setHeader('cache-control', 'no-store')
+        res.end(JSON.stringify(body))
+      }
+      try {
+        restart()
+        send(200, { ok: true })
+      } catch (error) {
+        send(500, { ok: false, error: String(error) })
+      }
+    },
+  })
+}

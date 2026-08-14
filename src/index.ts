@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { type ChannelStatusService, WecomChannel } from './channel.js'
 import { Config, type Config as PluginConfig } from './config.js'
 import { runChannelLoop } from './loop.js'
-import { registerStatusRoute } from './status.js'
+import { registerRestartRoute, registerStatusRoute } from './status.js'
 
 export const name = 'dsh-wecom'
 export const inject = [
@@ -26,7 +26,7 @@ export {
 } from './media.js'
 export { containsImageMedia, toContentBlocks } from './message.js'
 export type { Reply } from './pool.js'
-export { registerStatusRoute, type StatusPayload, statusPayload } from './status.js'
+export { registerRestartRoute, registerStatusRoute, type StatusPayload, statusPayload } from './status.js'
 export type { PluginConfig as ChannelConfig }
 export { Config, WecomChannel }
 
@@ -39,6 +39,8 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
   ctx.provide('wecomChannelStatus', status)
   // Browser UI + dashboards: `GET /api/wecom/status` (a no-op without a web server).
   ctx.effect(() => registerStatusRoute(ctx, () => channel.snapshot()), 'dsh-wecom.status-route')
+  // Browser UI control: `POST /api/wecom/restart` forces an immediate reconnect.
+  ctx.effect(() => registerRestartRoute(ctx, () => channel.reconnect()), 'dsh-wecom.restart-route')
   await ctx.effect(async function* () {
     let stopped = false
     yield async () => {

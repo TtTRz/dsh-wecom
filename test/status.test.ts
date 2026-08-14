@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ChannelStatus } from '../src/channel.js'
-import { processView, registerStatusRoute, statusPayload } from '../src/status.js'
+import { processView, registerRestartRoute, registerStatusRoute, statusPayload } from '../src/status.js'
 
 const snapshot: ChannelStatus = {
   connected: true,
@@ -187,6 +187,90 @@ describe('registerStatusRoute', () => {
   it('is a no-op disposer without a web server', () => {
     const ctx = { get: vi.fn(() => undefined) }
     const dispose = registerStatusRoute(ctx as never, () => snapshot)
+    expect(typeof dispose).toBe('function')
+    expect(() => dispose()).not.toThrow()
+  })
+})
+
+describe('registerRestartRoute', () => {
+  it('registers POST /api/wecom/restart and invokes the restart callback', () => {
+    const routes: unknown[] = []
+    let restarted = 0
+    const ctx = {
+      get: vi.fn((name: string) => {
+        if (name === 'webServer') {
+          return {
+            register: (route: unknown) => {
+              routes.push(route)
+              return () => undefined
+            },
+          }
+        }
+        return undefined
+      }),
+    }
+    registerRestartRoute(ctx as never, () => {
+      restarted += 1
+    })
+    const route = routes[0] as {
+      kind: string
+      path: string
+      handler: (req: unknown, res: { statusCode: number; body: string; setHeader(): void; end(b: string): void }) => void
+    }
+    expect(route.kind).toBe('exact')
+    expect(route.path).toBe('/api/wecom/restart')
+
+    const res = {
+      statusCode: 0,
+      body: '',
+      setHeader() {},
+      end(body: string) {
+        this.body = body
+      },
+    }
+    route.handler({}, res as never)
+    expect(restarted).toBe(1)
+    expect(res.statusCode).toBe(200)
+    expect(JSON.parse(res.body)).toEqual({ ok: true })
+  })
+
+  it('answers 500 when the restart callback throws', () => {
+    const routes: unknown[] = []
+    const ctx = {
+      get: vi.fn((name: string) => {
+        if (name === 'webServer') {
+          return {
+            register: (route: unknown) => {
+              routes.push(route)
+              return () => undefined
+            },
+          }
+        }
+        return undefined
+      }),
+    }
+    registerRestartRoute(ctx as never, () => {
+      throw new Error('no socket')
+    })
+    const route = routes[0] as {
+      handler: (req: unknown, res: { statusCode: number; body: string; setHeader(): void; end(b: string): void }) => void
+    }
+    const res = {
+      statusCode: 0,
+      body: '',
+      setHeader() {},
+      end(body: string) {
+        this.body = body
+      },
+    }
+    route.handler({}, res as never)
+    expect(res.statusCode).toBe(500)
+    expect(JSON.parse(res.body)).toEqual({ ok: false, error: 'Error: no socket' })
+  })
+
+  it('is a no-op disposer without a web server', () => {
+    const ctx = { get: vi.fn(() => undefined) }
+    const dispose = registerRestartRoute(ctx as never, () => undefined)
     expect(typeof dispose).toBe('function')
     expect(() => dispose()).not.toThrow()
   })

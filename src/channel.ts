@@ -171,6 +171,19 @@ export class WecomChannel {
     await this.pool.dispose()
   }
 
+  /**
+   * Force an immediate reconnect: drop the current socket and wake the owning
+   * restart loop, which re-runs {@link start} after `restartIntervalMs`. The
+   * channel stays non-stopping, so the bot comes back on its own — this is the
+   * "restart the long connection now" control, not a shutdown. A no-op while
+   * stopping.
+   */
+  reconnect(): void {
+    if (this.stopping) return
+    this.client?.disconnect()
+    this.dead.resolve()
+  }
+
   /** Resolves when the connection becomes unrecoverable or `stop()` runs. */
   untilDead(): Promise<void> {
     return this.dead.promise

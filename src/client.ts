@@ -191,6 +191,17 @@ export function apply(ctx: {
 
   function StatusPanel(): React.ReactNode {
     useStore()
+    const [restarting, setRestarting] = React.useState(false)
+    const restart = async (): Promise<void> => {
+      setRestarting(true)
+      try {
+        await fetch('/api/wecom/restart', { method: 'POST' })
+      } catch {
+        // status endpoint poll below surfaces the outcome
+      }
+      setRestarting(false)
+      void poll()
+    }
     // biome-ignore lint/correctness/useExhaustiveDependencies: the dep re-runs the poll when the panel opens
     React.useEffect(() => {
       if (store.open) void poll()
@@ -352,9 +363,18 @@ export function apply(ctx: {
         : null,
       rows,
       React.createElement(
-        'button',
-        { type: 'button', className: 'wecom-panel-btn', onClick: () => void poll() },
-        'Refresh',
+        'div',
+        { style: { display: 'flex', gap: '8px' } },
+        React.createElement(
+          'button',
+          { type: 'button', className: 'wecom-panel-btn', onClick: () => void poll() },
+          'Refresh',
+        ),
+        React.createElement(
+          'button',
+          { type: 'button', className: 'wecom-panel-btn', onClick: () => void restart(), disabled: restarting },
+          restarting ? 'Restarting…' : 'Restart',
+        ),
       ),
     )
   }

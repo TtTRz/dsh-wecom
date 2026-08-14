@@ -99,4 +99,21 @@ describe('WecomChannel status', () => {
     await channel.stop()
     await expect(dead).resolves.toBeUndefined()
   })
+
+  it('reconnect drops the socket and wakes the loop without stopping', async () => {
+    const { channel, client } = await makeRunningChannel()
+    const dead = channel.untilDead()
+    channel.reconnect()
+    await expect(dead).resolves.toBeUndefined()
+    expect(channel.snapshot()).toMatchObject({ stopping: false, connected: false })
+    expect((client as { isConnected: boolean }).isConnected).toBe(false)
+  })
+
+  it('reconnect is a no-op after stop', async () => {
+    const { channel, client } = await makeRunningChannel()
+    await channel.stop()
+    ;(client as { isConnected: boolean }).isConnected = true
+    channel.reconnect()
+    expect((client as { isConnected: boolean }).isConnected).toBe(true)
+  })
 })
