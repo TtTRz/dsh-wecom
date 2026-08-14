@@ -104,6 +104,20 @@ export WECOM_BOT_ID='你的 BotID'
 
 日志出现 `WeCom AI Bot authenticated` 后，给机器人发 `/bot-ping`，应回 `pong`。
 
+## 状态服务
+
+运行期间，插件会向主机发布 `wecomChannelStatus` 服务，供面板与 UI 插件渲染实时
+健康状态，而无需触碰通道内部实现：
+
+```ts
+const status = ctx.get('wecomChannelStatus') // { snapshot(): ChannelStatus }
+const health = status.snapshot()
+// { connected: boolean, stopping: boolean, conversations: number,
+//   authenticatedAt: number | null, lastError: string | null }
+```
+
+`snapshot()` 只返回纯标量字段，可以安全地放进 RPC 或 JSON。
+
 ## 开发
 
 ```sh

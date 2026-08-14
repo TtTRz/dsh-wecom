@@ -48,6 +48,25 @@ export interface BotClient {
 
 export type BotClientFactory = (options: WSClientOptions) => BotClient
 
+/** JSON-safe point-in-time health of the WeCom channel. */
+export interface ChannelStatus {
+  /** Whether the long connection is currently open. */
+  connected: boolean
+  /** Whether the channel is tearing down. */
+  stopping: boolean
+  /** Number of live conversation agents held by the pool. */
+  conversations: number
+  /** Epoch ms of the last successful authentication, or null before it. */
+  authenticatedAt: number | null
+  /** Message of the most recent connection error, or null when none. */
+  lastError: string | null
+}
+
+/** Status access consumed by dashboards and other UI surfaces. */
+export interface ChannelStatusService {
+  snapshot(): ChannelStatus
+}
+
 const COMMANDS = new Set(['/bot-ping', '/bot-help', '/bot-status', '/bot-cancel', '/bot-new'])
 
 /** Owns the WeCom WebSocket and funnels each message into a Harness agent. */
@@ -57,6 +76,8 @@ export class WecomChannel {
   private readonly dedupe: Dedupe
   private client: BotClient | undefined
   private stopping = false
+  private authenticatedAt: number | null = null
+  private lastError: string | null = null
 
   constructor(
     private readonly ctx: Context,
@@ -97,7 +118,10 @@ export class WecomChannel {
     }
 
     client.on('connected', () => this.log.info('WeCom WebSocket connected; authenticating'))
-    client.on('authenticated', resolveReady)
+    client.on('authenticated', () => {
+      this.authenticatedAt = Date.now()
+      resolveReady()
+    })
     client.on('disconnected', (reason) => {
       if (!this.stopping) this.log.warn('WeCom WebSocket disconnected: %s', reason)
     })
@@ -105,14 +129,19 @@ export class WecomChannel {
       this.log.warn('WeCom WebSocket reconnect attempt %d', attempt),
     )
     client.on('error', (error) => {
+      if (!this.stopping) {
+        this.lastError = error.message
+        this.log.error('WeCom WebSocket error: %s', error.message)
+      }
       if (error instanceof WSAuthFailureError || error instanceof WSReconnectExhaustedError) {
         rejectReady(error)
       }
-      if (!this.stopping) this.log.error('WeCom WebSocket error: %s', error.message)
     })
     client.on('event.disconnected_event', () => {
-      if (!this.stopping)
-        this.log.error('WeCom connection was replaced by another client for this Bot ID')
+      if (!this.stopping) {
+        this.lastError = 'Connection replaced by another client for this Bot ID'
+        this.log.error(this.lastError)
+      }
     })
     client.on('message', async (frame) => this.onMessage(frame))
     client.on('event.enter_chat', async (frame) => this.greet(frame))
@@ -133,6 +162,17 @@ export class WecomChannel {
     this.stopping = true
     this.client?.disconnect()
     await this.pool.dispose()
+  }
+
+  /** Point-in-time health for dashboards; scalar fields only, no live objects. */
+  snapshot(): ChannelStatus {
+    return {
+      connected: this.client?.isConnected ?? false,
+      stopping: this.stopping,
+      conversations: this.pool.size(),
+      authenticatedAt: this.authenticatedAt,
+      lastError: this.lastError,
+    }
   }
 
   private openClient(secret: string): BotClient {

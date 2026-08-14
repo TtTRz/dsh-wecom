@@ -44,6 +44,11 @@ export class AgentPool {
     this.persisted = new Set(headers.map((header) => String(header.id)))
   }
 
+  /** Number of live conversation agents currently held. */
+  size(): number {
+    return this.agents.size
+  }
+
   /** Feed one message to its conversation's agent, serialized per conversation. */
   handle(message: BaseMessage, download: MediaPort['download']): Promise<Reply> {
     const { id } = this.locate(message)

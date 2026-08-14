@@ -117,9 +117,11 @@ describe('AgentPool', () => {
       { name: 'wecom-instructions', order: 50, text: 'WeCom test instructions' },
     ])
     expect(reply).toEqual({ text: 'Harness reply' })
+    expect(manager.size()).toBe(1)
 
     await manager.dispose()
     expect(disposed).toHaveLength(1)
+    expect(manager.size()).toBe(0)
   })
 
   it('resumes a persisted session instead of recreating it', async () => {

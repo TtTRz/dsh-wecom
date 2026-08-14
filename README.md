@@ -102,6 +102,21 @@ Tune the mounted row in `~/.dsh/profiles/web/cordis.patch.yml`:
 
 Once the log prints `WeCom AI Bot authenticated`, try `/bot-ping` and expect a `pong` back.
 
+## Status service
+
+While running, the plugin publishes a host-wide `wecomChannelStatus` service so
+dashboards and UI plugins can render live health without touching channel
+internals:
+
+```ts
+const status = ctx.get('wecomChannelStatus') // { snapshot(): ChannelStatus }
+const health = status.snapshot()
+// { connected: boolean, stopping: boolean, conversations: number,
+//   authenticatedAt: number | null, lastError: string | null }
+```
+
+`snapshot()` returns plain scalars only — safe to serialize into RPC or JSON.
+
 ## Development
 
 ```sh
