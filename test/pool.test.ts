@@ -49,6 +49,7 @@ function makeHarness() {
   })
 
   const ctx = {
+    logger: () => ({ debug() {}, info() {}, warn() {}, error() {} }),
     sessionPersistence: { list: vi.fn(async () => []) },
     agentDefaultModel: {
       currentSelection: vi.fn(() => ({ provider: 'deepseek', model: 'deepseek-chat' })),
@@ -159,6 +160,7 @@ describe('AgentPool', () => {
   it('cancels the turn on response timeout', async () => {
     const hanging = makeAgent({ hang: true })
     const ctx = {
+      logger: () => ({ debug() {}, info() {}, warn() {}, error() {} }),
       sessionPersistence: { list: vi.fn(async () => []) },
       agentDefaultModel: {
         currentSelection: vi.fn(() => ({ provider: 'deepseek', model: 'deepseek-chat' })),
@@ -191,7 +193,7 @@ describe('AgentPool', () => {
   it('claims a workspace on cwd and adds every conversation session to it', async () => {
     const added: string[] = []
     const create = vi.fn(async (path: string, title: string) => ({
-      addSession: vi.fn(async (sessionId: string) => {
+      attachSession: vi.fn(async (sessionId: string) => {
         added.push(sessionId)
       }),
       path,
@@ -222,7 +224,7 @@ describe('AgentPool', () => {
   it('creates the workspace lazily when the registry appears after startup', async () => {
     const added: string[] = []
     const create = vi.fn(async (path: string, title: string) => ({
-      addSession: vi.fn(async (sessionId: string) => {
+      attachSession: vi.fn(async (sessionId: string) => {
         added.push(sessionId)
       }),
       path,
@@ -240,5 +242,23 @@ describe('AgentPool', () => {
     await manager.handle(singleMessage('one'), noopDownload)
     expect(create).toHaveBeenCalledWith('/tmp/wecom-test', 'WeCom')
     expect(added).toEqual([created[0]?.sessionId])
+  })
+
+  it('a failing attach never fails the message itself', async () => {
+    const create = vi.fn(async () => ({
+      attachSession: vi.fn(async () => {
+        throw new Error('cwd does not match the workspace path')
+      }),
+    }))
+    const { ctx } = makeHarness()
+    const get = ctx.get as ReturnType<typeof vi.fn>
+    get.mockImplementation((name: string) =>
+      name === 'workspaceRegistry' ? { create } : undefined,
+    )
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+    await expect(manager.handle(singleMessage('one'), noopDownload)).resolves.toEqual({
+      text: 'Harness reply',
+    })
   })
 })

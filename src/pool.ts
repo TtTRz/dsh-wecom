@@ -21,7 +21,7 @@ export interface Reply {
 
 /** Structural face of a workspace entity (absent outside web profiles). */
 interface WorkspaceLike {
-  addSession(sessionId: string): Promise<void>
+  attachSession(sessionId: string): Promise<void>
 }
 interface WorkspaceRegistryLike {
   create(path: string, title?: string): Promise<WorkspaceLike>
@@ -33,6 +33,7 @@ interface WorkspaceRegistryLike {
  * preset in its scoped setup so it inherits the preset's tools and persona.
  */
 export class AgentPool {
+  private readonly log
   private readonly agents = new Map<string, AgentHandle>()
   private readonly pending = new Map<string, Promise<AgentHandle>>()
   private readonly chains = new Map<string, Promise<unknown>>()
@@ -45,6 +46,7 @@ export class AgentPool {
     private readonly ctx: Context,
     private readonly config: Config,
   ) {
+    this.log = ctx.logger('dsh-wecom')
     this.semaphore = new Semaphore(config.maxConcurrent)
   }
 
@@ -101,10 +103,19 @@ export class AgentPool {
     return registry.create(this.config.cwd, this.config.workspaceTitle)
   }
 
-  /** Add one conversation session to the grouping workspace, when claimed. */
+  /**
+   * Attach one conversation session to the grouping workspace, when claimed.
+   * Best-effort by design: a session whose stored cwd predates the workspace
+   * path (or any registry hiccup) must never fail the message itself — it
+   * simply stays Ungrouped.
+   */
   private async groupSession(id: string): Promise<void> {
-    const workspace = await this.ensureWorkspace()
-    await workspace?.addSession(id)
+    try {
+      const workspace = await this.ensureWorkspace()
+      await workspace?.attachSession(id)
+    } catch (error) {
+      this.log.error('WeCom workspace attach failed for %s: %s', id, String(error))
+    }
   }
 
   /** Number of live conversation agents currently held. */
