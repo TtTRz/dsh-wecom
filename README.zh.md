@@ -115,15 +115,16 @@ export WECOM_BOT_ID='你的 BotID'
 
 | 命令 | 作用 |
 | --- | --- |
-| `/bot-ping` | 连通性自检 |
-| `/bot-help` | 列出命令 |
-| `/bot-status` | 会话状态 |
-| `/bot-cancel` | 取消当前生成 |
-| `/bot-new` | 开新会话（旧会话历史保留，新消息走新 session） |
+| `/ping` | 连通性自检 |
+| `/help` | 列出命令 |
+| `/status` | 会话状态 |
+| `/stop` | 取消当前生成 |
+| `/compact` | 压缩历史（旧消息摘要，省上下文） |
+| `/new` | 开新会话（旧会话历史保留，新消息走新 session） |
 
 ## 验证
 
-日志出现 `WeCom AI Bot authenticated` 后，给机器人发 `/bot-ping`，应回 `pong`。
+日志出现 `WeCom AI Bot authenticated` 后，给机器人发 `/ping`，应回 `pong`。
 
 ## 状态服务
 

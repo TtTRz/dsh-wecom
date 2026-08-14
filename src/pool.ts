@@ -52,6 +52,40 @@ interface SessionTitleLike {
 /** Upper bound for auto-generated conversation titles. */
 const TITLE_MAX_LENGTH = 60
 
+/** Structural face of the optional `compaction` service (`ctx.compaction`). */
+interface CompactionEngineLike {
+  compactNow(
+    agent: ManualCompactAgentLike,
+    signal: AbortSignal,
+    sourceCommandId?: unknown,
+  ): Promise<CompactionResultLike | null>
+}
+
+/** Minimal agent face `compactNow` consumes; `Agent` satisfies it structurally. */
+interface ManualCompactAgentLike {
+  session: unknown
+  options: { provider?: string; model?: string }
+  runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T>
+}
+
+interface CompactionResultLike {
+  shadowedSeqs: readonly unknown[]
+  shadowedTokenCount: number
+}
+
+/** Human-only outcomes for expected failures (mirrors `dsh-command-compact`). */
+const COMPACT_FAILURE_TEXT: Readonly<Record<string, string>> = {
+  busy: 'Compaction is unavailable because this process has an active compaction, or the agent is not idle.',
+  cancelled: 'Compaction cancelled.',
+  changed:
+    'The history selected for compaction changed before it could be replaced. The conversation is unchanged; the attempt is recorded in the session log.',
+  summary:
+    'Compaction could not produce a useful summary. The conversation is unchanged; the attempt is recorded in the session log.',
+  commit:
+    'Compaction did not finish cleanly; some session history may have changed. Inspect the current session state before retrying.',
+  persistence: 'Compaction finished, but the session could not be saved.',
+}
+
 /**
  * One Harness agent per WeCom conversation: opened on first use, resumed from
  * persistence after restarts, and closed with the plugin. Each agent mounts a
@@ -230,6 +264,35 @@ export class AgentPool {
     if (agent === undefined || agent.status === 'idle') return false
     agent.cancel({ kind: 'user' })
     return true
+  }
+
+  /**
+   * Compact the conversation's older history into a summary via the optional
+   * `ctx.compaction` seam. The engine runs it as an idle-session maintenance
+   * task, so the harness withholds waking input until the summary settles.
+   */
+  async compact(message: BaseMessage): Promise<string> {
+    const compaction = this.ctx.get('compaction') as CompactionEngineLike | undefined
+    if (compaction === undefined) return 'Compaction is not available in this harness build.'
+    const { id } = this.locate(message)
+    const agent = this.agents.get(id)?.agent ?? this.ctx.agents.get(SessionId(id))
+    if (agent === undefined) return 'No conversation yet — send a message first, then try /compact.'
+    const signal = AbortSignal.timeout(this.config.turnTimeoutMs)
+    try {
+      const result = await compaction.compactNow(agent, signal)
+      if (result === null) return 'No compactable history yet.'
+      return `Compacted ${result.shadowedSeqs.length} history items (~${result.shadowedTokenCount} tokens).`
+    } catch (error) {
+      if (signal.aborted) {
+        return `Compaction timed out after ${Math.round(this.config.turnTimeoutMs / 1000)}s.`
+      }
+      const code = (error as { code?: unknown }).code
+      if (typeof code === 'string') {
+        const text = COMPACT_FAILURE_TEXT[code]
+        if (text !== undefined) return text
+      }
+      throw error
+    }
   }
 
   /** Drop the current conversation; the next message starts a fresh session. */

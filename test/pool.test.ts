@@ -563,4 +563,81 @@ describe('AgentPool', () => {
     await manager.handle(singleMessage('two'), noopDownload)
     expect(created).toHaveLength(1)
   })
+
+  describe('compact', () => {
+    it('reports when the compaction service is not mounted', async () => {
+      const { ctx } = makeHarness()
+      const manager = new AgentPool(ctx as never, testConfig())
+      await manager.start()
+
+      expect(await manager.compact(singleMessage())).toBe(
+        'Compaction is not available in this harness build.',
+      )
+    })
+
+    it('reports when no conversation agent exists yet', async () => {
+      const { ctx } = makeHarness()
+      ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+        name === 'compaction' ? { compactNow: vi.fn() } : undefined,
+      )
+      const manager = new AgentPool(ctx as never, testConfig())
+      await manager.start()
+
+      expect(await manager.compact(singleMessage())).toBe(
+        'No conversation yet — send a message first, then try /compact.',
+      )
+    })
+
+    it('compacts through the seam and reports the summary size', async () => {
+      const { ctx, live } = makeHarness()
+      const compactNow = vi.fn(async (_agent: unknown, _signal: AbortSignal) => ({
+        shadowedSeqs: [1, 2, 3],
+        shadowedTokenCount: 1200,
+      }))
+      ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+        name === 'compaction' ? { compactNow } : undefined,
+      )
+      const manager = new AgentPool(ctx as never, testConfig())
+      await manager.start()
+      await manager.handle(singleMessage('one'), noopDownload)
+
+      expect(await manager.compact(singleMessage('two'))).toBe(
+        'Compacted 3 history items (~1200 tokens).',
+      )
+      expect(compactNow).toHaveBeenCalledTimes(1)
+      expect(compactNow.mock.calls[0]?.[0]).toBe([...live.values()][0])
+    })
+
+    it('reports null as no compactable history', async () => {
+      const { ctx } = makeHarness()
+      ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+        name === 'compaction' ? { compactNow: vi.fn(async () => null) } : undefined,
+      )
+      const manager = new AgentPool(ctx as never, testConfig())
+      await manager.start()
+      await manager.handle(singleMessage('one'), noopDownload)
+
+      expect(await manager.compact(singleMessage('two'))).toBe('No compactable history yet.')
+    })
+
+    it('maps expected failure codes to concise replies', async () => {
+      const { ctx } = makeHarness()
+      ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+        name === 'compaction'
+          ? {
+              compactNow: vi.fn(async () => {
+                throw Object.assign(new Error('busy'), { code: 'busy' })
+              }),
+            }
+          : undefined,
+      )
+      const manager = new AgentPool(ctx as never, testConfig())
+      await manager.start()
+      await manager.handle(singleMessage('one'), noopDownload)
+
+      expect(await manager.compact(singleMessage('two'))).toBe(
+        'Compaction is unavailable because this process has an active compaction, or the agent is not idle.',
+      )
+    })
+  })
 })

@@ -115,15 +115,16 @@ Tune the mounted row in `~/.dsh/profiles/web/cordis.patch.yml`:
 
 | command | what it does |
 | --- | --- |
-| `/bot-ping` | connectivity check |
-| `/bot-help` | list commands |
-| `/bot-status` | session status |
-| `/bot-cancel` | cancel the current generation |
-| `/bot-new` | start a fresh conversation (history is kept, the next message opens a new session) |
+| `/ping` | connectivity check |
+| `/help` | list commands |
+| `/status` | session status |
+| `/stop` | cancel the current generation |
+| `/compact` | summarize older history into a summary to save context |
+| `/new` | start a fresh conversation (history is kept, the next message opens a new session) |
 
 ## Verify
 
-Once the log prints `WeCom AI Bot authenticated`, try `/bot-ping` and expect a `pong` back.
+Once the log prints `WeCom AI Bot authenticated`, try `/ping` and expect a `pong` back.
 
 ## Status service
 

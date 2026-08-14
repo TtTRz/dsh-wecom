@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-15
+
+### Added
+
+- `/compact` command: summarizes the conversation's older history into one summary through the optional `ctx.compaction` seam, when that capability is mounted in the running harness.
+
+### Changed
+
+- Bot commands renamed to the industry-standard set — `/ping`, `/help`, `/status`, `/stop`, `/new` — matching common Discord/Slack bot and AI assistant conventions. The old `/bot-*` names are removed.
+
 ## [0.1.1] - 2026-08-15
 
 ### Added

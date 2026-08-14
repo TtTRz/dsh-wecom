@@ -1,6 +1,6 @@
 {
   "name": "dsh-wecom",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "dsh-wecom: a WeCom AI Bot channel for DeepSeek Harness — each chat runs a persistent, preset-backed agent over the official long connection.",
   "type": "module",
   "main": "dist/index.js",

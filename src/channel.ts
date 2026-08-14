@@ -67,7 +67,7 @@ export interface ChannelStatusService {
   snapshot(): ChannelStatus
 }
 
-const COMMANDS = new Set(['/bot-ping', '/bot-help', '/bot-status', '/bot-cancel', '/bot-new'])
+const COMMANDS = new Set(['/ping', '/help', '/status', '/stop', '/compact', '/new'])
 
 /**
  * Assemble one WeCom stream frame from reasoning and visible text. The WeCom
@@ -376,27 +376,29 @@ export class WecomChannel {
     command: string,
   ): Promise<void> {
     const streamId = generateReqId('dsh')
-    if (command === '/bot-ping') {
+    if (command === '/ping') {
       await this.sendStream(frame, streamId, 'pong — dsh-wecom connected.', true)
       return
     }
-    if (command === '/bot-help') {
+    if (command === '/help') {
       await this.sendStream(
         frame,
         streamId,
         [
           'dsh-wecom bot',
-          '/bot-ping — connectivity check',
-          '/bot-status — session status',
-          '/bot-cancel — cancel the current generation',
-          '/bot-new — start a fresh conversation (history is kept)',
+          '/ping — connectivity check',
+          '/help — list commands',
+          '/status — session status',
+          '/stop — cancel the current generation',
+          '/compact — summarize older history to save context',
+          '/new — start a fresh conversation (history is kept)',
           'Anything else goes to the current Harness default model.',
         ].join('\n'),
         true,
       )
       return
     }
-    if (command === '/bot-status') {
+    if (command === '/status') {
       await this.sendStream(
         frame,
         streamId,
@@ -405,7 +407,7 @@ export class WecomChannel {
       )
       return
     }
-    if (command === '/bot-cancel') {
+    if (command === '/stop') {
       const cancelled = this.pool.cancel(message)
       await this.sendStream(
         frame,
@@ -415,7 +417,12 @@ export class WecomChannel {
       )
       return
     }
-    if (command === '/bot-new') {
+    if (command === '/compact') {
+      const text = await this.pool.compact(message)
+      await this.sendStream(frame, streamId, text, true)
+      return
+    }
+    if (command === '/new') {
       await this.pool.forget(message)
       await this.sendStream(frame, streamId, 'Started a new conversation.', true)
     }
