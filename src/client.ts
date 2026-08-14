@@ -33,6 +33,23 @@ interface StatusView {
   conversations?: number
   authenticatedAgoMs?: number | null
   lastError?: string | null
+  agents?: Array<{
+    sessionId: string
+    status: string
+    model: string
+    wecom: boolean
+  }>
+  process?: {
+    memoryRss: number
+    uptimeSec: number
+    loadavg: number[]
+    totalmem: number
+    freemem: number
+  }
+  sessions?: {
+    total: number
+    wecom: number
+  }
 }
 
 /** "3m ago"-style duration from an epoch-delta in milliseconds. */
@@ -43,17 +60,45 @@ export function formatAgo(ms: number | null | undefined): string {
   return `${Math.floor(ms / (60 * 60 * 1000))}h ago`
 }
 
+/** Whole-megabyte memory rendering. */
+export function formatBytes(bytes: number | null | undefined): string {
+  if (bytes === null || bytes === undefined) return '—'
+  return `${Math.round(bytes / (1024 * 1024))} MB`
+}
+
+/** "2h 5m"-style process uptime. */
+export function formatUptime(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined) return '—'
+  if (seconds < 60) return `${seconds}s`
+  if (seconds < 60 * 60) return `${Math.floor(seconds / 60)}m`
+  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`
+}
+
+/** Compact row label for one live agent. */
+export function agentLabel(agent: { sessionId: string; wecom: boolean }): string {
+  if (agent.wecom) {
+    const parts = agent.sessionId.split('-')
+    const scope = parts[2] ?? 'chat'
+    return `WeCom · ${scope}`
+  }
+  return `Web · ${agent.sessionId.slice(-6)}`
+}
+
 const CSS = [
   '.wecom-nav-btn{display:flex;align-items:center;gap:6px;cursor:pointer;background:transparent;border:none;color:var(--dsw-alias-label-secondary);padding:6px 10px;border-radius:8px;font-size:13px}',
   '.wecom-nav-btn:hover{background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary)}',
   '.wecom-dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none}',
-  '.wecom-panel{position:fixed;right:16px;bottom:16px;width:300px;z-index:9999;pointer-events:auto;background:var(--dsw-alias-bg-overlay);border:1px solid var(--dsw-alias-border-l1);border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,0.25);padding:14px 16px;font-size:13px;color:var(--dsw-alias-label-primary)}',
+  '.wecom-panel{position:fixed;right:16px;bottom:16px;width:320px;max-height:70vh;overflow:auto;z-index:9999;pointer-events:auto;background:var(--dsw-alias-bg-overlay);border:1px solid var(--dsw-alias-border-l1);border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,0.25);padding:14px 16px;font-size:13px;color:var(--dsw-alias-label-primary)}',
   '.wecom-panel-head{display:flex;align-items:center;justify-content:space-between;font-weight:600;margin-bottom:6px}',
   '.wecom-panel-close{cursor:pointer;border:none;background:transparent;color:var(--dsw-alias-label-secondary);font-size:16px;line-height:1}',
-  '.wecom-panel-row{display:flex;justify-content:space-between;gap:12px;margin:7px 0}',
+  '.wecom-panel-row{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:7px 0}',
   '.wecom-panel-label{color:var(--dsw-alias-label-secondary)}',
   '.wecom-panel-error{color:var(--dsw-alias-state-error-primary);word-break:break-word;margin:4px 0}',
   '.wecom-panel-btn{margin-top:6px;cursor:pointer;background:transparent;border:1px solid var(--dsw-alias-border-l1);color:var(--dsw-alias-label-primary);border-radius:6px;padding:4px 10px;font-size:12px}',
+  '.wecom-panel-section{margin-top:10px;padding-top:8px;border-top:1px solid var(--dsw-alias-border-l1);color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:600}',
+  '.wecom-agent-row{display:flex;align-items:center;gap:8px;margin:6px 0}',
+  '.wecom-agent-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+  '.wecom-agent-model{color:var(--dsw-alias-label-secondary);font-size:12px}',
 ].join('')
 
 interface Store {
@@ -183,6 +228,42 @@ export function apply(ctx: {
         ),
       )
     }
+
+    const agentNodes: React.ReactNode[] = []
+    const agents = status.agents ?? []
+    for (const agent of agents.slice(0, 8)) {
+      agentNodes.push(
+        React.createElement(
+          'div',
+          { key: agent.sessionId, className: 'wecom-agent-row' },
+          React.createElement('span', {
+            className: 'wecom-dot',
+            style: {
+              background:
+                agent.status === 'running'
+                  ? 'var(--dsw-alias-state-success-primary)'
+                  : 'var(--dsw-alias-label-secondary)',
+            },
+          }),
+          React.createElement('span', { className: 'wecom-agent-label' }, agentLabel(agent)),
+          agent.model
+            ? React.createElement('span', { className: 'wecom-agent-model' }, agent.model)
+            : null,
+        ),
+      )
+    }
+    if (agents.length > 8) {
+      agentNodes.push(
+        React.createElement(
+          'div',
+          { key: 'more', className: 'wecom-agent-model' },
+          `+${agents.length - 8} more`,
+        ),
+      )
+    }
+    const proc = status.process
+    const counts = status.sessions
+
     return React.createElement(
       'div',
       { className: 'wecom-panel' },
@@ -232,6 +313,43 @@ export function apply(ctx: {
           status.available === true ? formatAgo(status.authenticatedAgoMs) : '—',
         ),
       ),
+      React.createElement('div', { className: 'wecom-panel-section' }, 'Live agents'),
+      agentNodes.length > 0
+        ? agentNodes
+        : React.createElement('div', { className: 'wecom-agent-model' }, 'None'),
+      counts
+        ? React.createElement(
+            'div',
+            { className: 'wecom-panel-row' },
+            React.createElement('span', { className: 'wecom-panel-label' }, 'Sessions'),
+            React.createElement('span', null, `${counts.wecom} WeCom · ${counts.total} total`),
+          )
+        : null,
+      proc
+        ? React.createElement(
+            'div',
+            null,
+            React.createElement('div', { className: 'wecom-panel-section' }, 'Process'),
+            React.createElement(
+              'div',
+              { className: 'wecom-panel-row' },
+              React.createElement('span', { className: 'wecom-panel-label' }, 'Memory'),
+              React.createElement('span', null, formatBytes(proc.memoryRss)),
+            ),
+            React.createElement(
+              'div',
+              { className: 'wecom-panel-row' },
+              React.createElement('span', { className: 'wecom-panel-label' }, 'Uptime'),
+              React.createElement('span', null, formatUptime(proc.uptimeSec)),
+            ),
+            React.createElement(
+              'div',
+              { className: 'wecom-panel-row' },
+              React.createElement('span', { className: 'wecom-panel-label' }, 'Load'),
+              React.createElement('span', null, (proc.loadavg?.[0] ?? 0).toFixed(2)),
+            ),
+          )
+        : null,
       rows,
       React.createElement(
         'button',

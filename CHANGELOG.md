@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Runtime overview in `GET /api/wecom/status` and the sidebar panel: live
+  agents (running first, WeCom-flagged, with model), session counts (total and
+  WeCom), and process/machine load (RSS, uptime, load average).
 - Restart loop (`runChannelLoop`): the channel restarts itself after every
   unrecoverable end — auth failure, reconnect exhaustion, or replacement by
   another client — after `restartIntervalMs` (default 10s), instead of leaving
