@@ -5,7 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.6] - 2026-08-15
+
+### Changed
+
+- READMEs (EN/ZH) rewritten in the popular GitHub style: badges, quick-start-first layout, feature cards, and compact config/command tables; `showToolCalls` description updated to the 0.1.5 think-card rendering.
 
 ## [0.1.5] - 2026-08-15
 
