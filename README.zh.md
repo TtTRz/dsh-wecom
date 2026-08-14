@@ -1,82 +1,60 @@
 # dsh-wecom
 
-把企业微信「智能机器人」接到 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)：每一条单聊 / 群聊会话，背后都是一个**真正带工具的 Harness agent**。
+> [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的企业微信 AI 机器人 channel——每条单聊/群聊背后都是一个真正带工具的 agent，流式回复、思考卡片、实时状态面板。
 
-## 它解决什么
+[![npm version](https://img.shields.io/npm/v/dsh-wecom)](https://www.npmjs.com/package/dsh-wecom)
+[![license](https://img.shields.io/npm/l/dsh-wecom)](LICENSE)
+[![node](https://img.shields.io/node/v/dsh-wecom)](https://nodejs.org)
 
-企微智能机器人官方只提供长连接通道，至于「收到消息之后交给谁回答」是空的。这个插件补上后半段：
+通过官方长连接把企业微信「智能机器人」接入 dsh。每个会话对应一个**持久化的 Harness agent（带工具）**，而不是裸聊天循环。
 
-- 一个会话 = 一个 agent，且 agent **在自己的作用域里挂载了 preset**（默认 `standard`）。这意味着它拥有 preset 的 bash / read / edit / skills 等工具和人设，而不是一个只会聊天的空壳。
-- 会话 id 由 `sha256(namespace · scope · peer)` 确定性生成，不落真实 userid，跨进程重启通过 `sessionPersistence` 续跑。
-- 图片 / 文件也能收：图片用官方 SDK 下载解密后挂成附件（模型不支持看图时自动降级为文字说明）；文件 / 视频落进 agent 工作目录，让 agent 用自己的工具去读。
+## ✨ 特性
 
-## 连接流程
+- 🤖 **一会话一 agent**——在隔离 setup 里挂载 preset（默认 `standard`），天然拥有 preset 的工具（`bash`、`read`、`edit`、skills…）与人设；会话 id 由 `sha256(namespace · scope · peer)` 确定性派生（不落原始 userid），经 `sessionPersistence` 跨重启存活
+- 🖼️ **多媒体**——图片下载后用官方 SDK 解密、模型可看时自动附带；文件/视频落入 agent 工作区供工具读取
+- ⚡ **流式回复**——token 级文本流、原生 `<think>` 思考卡片、卡片内的紧凑工具调用列表
+- 🛡️ **访问策略**——单聊/群聊各自 `open` / `allowlist` / `disabled`（群按 `chatid` 控制）
+- 🧹 **消息治理**——msgid 去重、按会话排队、全局并发上限、单轮超时主动 cancel 不留僵尸轮次
+- 📡 **自愈**——长连接断开（被踢/鉴权失败/被新客户端顶掉）后按 `restartIntervalMs`（默认 10s）自动重连
+- 🩺 **可观测**——主机级 `wecomChannelStatus` 服务、`GET /api/wecom/status` JSON 路由、侧栏入口 + 连接状态圆点 + 浮动状态面板
+- 💬 **机器人命令**——`/ping /help /status /stop /compact /new`
 
-```
-企微智能机器人
-   │  WebSocket 长连接（wss://openws.work.weixin.qq.com）
-   │  认证帧 body 只含 { bot_id, secret }（按官方文档，无多余字段）
-   ▼
-dsh-wecom 插件（host 常驻）
-   │  msgid 去重 → 访问策略 → 每会话串行队列 → 全局并发上限
-   │  create/resume agent（setup 里挂 preset + 注入持久指令段）
-   │  agent.followup(userMessage) → await agent.whenIdle()
-   │  超时则 agent.cancel()，不留僵尸 turn
-   ▼
-按会话持久化的 Harness agent（sessionPersistence）
-```
-
-## 相比「裸 create」的关键差异
-
-| 点 | 说明 |
-| --- | --- |
-| 挂 preset | `setup` 里 `presets.mount(agentCtx, presetId)`，agent 才有工具和人设 |
-| 持久指令 | `systemPrompt.section()` 每轮叠加，不是一次性 `inject` |
-| 超时即取消 | `turnTimeoutMs` 到了会 `agent.cancel()`，而不是只回错误、turn 还在后台跑 |
-| 群聊白名单 | 按群 `chatid` 限定（`groupAllowlist`），不是按发消息的人 |
-| 全局背压 | `maxConcurrent` 限制同时跑几个 turn |
-
-## 安装
+## 🚀 快速开始
 
 ```sh
-dsh plugin --profile web add github:TtTRz/dsh-wecom
+dsh plugin --profile web add dsh-wecom
+
+export WECOM_BOT_ID='你的机器人id'
+export WECOM_BOT_SECRET='你的secret'   # 仅开发环境；生产用 credential 服务
+
+dsh web
 ```
 
-> pnpm ≥10 默认拒绝运行 git 依赖的构建脚本，首次 `add` 会失败并提示 `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`。按提示把 pnpm 打印的包键加入该 profile 的 `pnpm-workspace.yaml`（一般形如 `dsh-wecom`），然后重新执行 `add`。这份授权等于允许包代码在安装时于本机沙箱外执行，请锁定 commit：`github:TtTRz/dsh-wecom#<sha>`。
->
-> 不想授权的话，改用 tarball 安装（预构建产物，无需构建授权）：
->
-> ```sh
-> git clone https://github.com/TtTRz/dsh-wecom && cd dsh-wecom
-> npm install && npm pack    # 产出 dsh-wecom-0.1.0.tgz
-> dsh plugin --profile web add ./dsh-wecom-0.1.0.tgz
-> ```
+日志出现 `WeCom AI Bot authenticated` 后，发 `/ping` 应收到 `pong`。
 
-本地路径：
+持久化：`WECOM_BOT_ID` 写入 `~/.dsh/.env`，`WECOM_BOT_SECRET` 写入 `~/.dsh/.credentials.yaml`（引用 `WECOM_BOT_SECRET`）；`DSH_WECOM_CWD` 覆盖 agent 工作目录。
+
+## 📦 从源码安装
+
+Git 安装（请锁定 commit——构建脚本会在你机器上执行）：
 
 ```sh
-dsh plugin --profile web add /absolute/path/to/dsh-wecom
+dsh plugin --profile web add github:TtTRz/dsh-wecom#<sha>
 ```
 
-本地路径安装是直接链接源码，不会跑构建脚本，先执行 `npm install && npm run build` 产出 `dist/`。
-
-## 配置
-
-Secret 走 Harness 密钥服务（引用 `WECOM_BOT_SECRET`），Bot ID 走启动环境 `WECOM_BOT_ID`。两者都别提交进仓库。
+> pnpm ≥10 默认拒绝 git 依赖的构建脚本（`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`）：把 pnpm 提示的包名加进该 profile 的 `pnpm-workspace.yaml` 后重试。想完全避开授权，用预构建 tarball：
 
 ```sh
-export WECOM_BOT_ID='你的 BotID'
-# Secret 用 Harness 的凭证设置面板存到引用 WECOM_BOT_SECRET（也可开发期 export）
+git clone https://github.com/TtTRz/dsh-wecom && cd dsh-wecom
+npm install && npm pack                # 产出 dsh-wecom-0.1.5.tgz
+dsh plugin --profile web add ./dsh-wecom-0.1.5.tgz
 ```
 
-持久化时，把 `WECOM_BOT_ID` 写进 `~/.dsh/.env`（harness 启动时读取 user 层 `.env`），`WECOM_BOT_SECRET` 写进 `~/.dsh/.credentials.yaml`。`DSH_WECOM_CWD` 可覆盖 agent 工作目录。
+本地目录：`dsh plugin --profile web add /绝对路径/dsh-wecom`（链接源码、不跑构建脚本——先 `npm install && npm run build` 产出 `dist/`）。
 
-每个企微会话都会挂进基于 `cwd` 创建的 workspace（标题 `workspaceTitle`，默认
-`WeCom`），不再掉进侧边栏的"未分组"；把 `DSH_WECOM_CWD` 指向独立目录即可与
-你自己的会话分开。长连接一旦死掉（被踢、鉴权失败或被别的客户端顶替），通道会
-在 `restartIntervalMs`（默认 10 秒）后自动重启，不会留下死掉的机器人。
+## ⚙️ 配置
 
-在 `~/.dsh/profiles/web/cordis.patch.yml` 覆盖插件行：
+调整 `~/.dsh/profiles/web/cordis.patch.yml` 中挂载的行：
 
 ```yaml
 - id: wecom-channel
@@ -90,76 +68,66 @@ export WECOM_BOT_ID='你的 BotID'
     dmPolicy: open
     dmAllowlist: []
     groupPolicy: allowlist
-    groupAllowlist: [wr_你要的群chatid]
-    greeting: 您好，我是助手。
+    groupAllowlist: [wr_你的群chatid]
+    greeting: 你好，我是助手。
 ```
-
-字段：
 
 | 字段 | 默认 | 含义 |
 | --- | --- | --- |
-| `preset` | `standard` | 挂到每个会话 agent 的具名 preset |
+| `preset` | `standard` | 挂进每个会话 agent 的 preset |
 | `dmPolicy` / `groupPolicy` | `open` | `open` / `allowlist` / `disabled` |
 | `dmAllowlist` | `[]` | 单聊 userid 白名单 |
 | `groupAllowlist` | `[]` | 群聊 chatid 白名单 |
-| `instructions` | 企业聊天引导语 | 每轮叠加在人设上的指令段 |
-| `imageMode` | `auto` | 模型支持看图就挂附件；`always` / `never` 强制开关 |
-| `streaming` | `true` | 逐 token 流式回复；`false` 则只发 ack + 最终全文 |
-| `streamFlushMs` | `250` | 流式文本刷新间隔（毫秒） |
-| `showReasoning` | `true` | 思考内容放进企微原生 `<think>` 卡片（可折叠的「思考过程」） |
-| `showToolCalls` | `true` | 最终答复附工具调用摘要 |
-| `maxConcurrent` | `4` | 全局并发 turn 上限 |
-| `turnTimeoutMs` | `300000` | 单轮超时（超时会取消该 turn） |
+| `instructions` | 企业会话指引 | 每轮叠加在人设上的指令段 |
+| `imageMode` | `auto` | `auto` 模型可看图时附带；`always` / `never` 强制 |
+| `streaming` | `true` | token 级流式；`false` 只回执 + 最终答案 |
+| `streamFlushMs` | `250` | 流式文本冲刷节奏（ms） |
+| `showReasoning` | `true` | 推理包进企微原生 `<think>` 卡片 |
+| `showToolCalls` | `true` | 在 `<think>` 卡片内渲染紧凑的工具调用列表 |
+| `maxConcurrent` | `4` | 全局并发轮次上限 |
+| `turnTimeoutMs` | `300000` | 单轮超时（超时取消本轮） |
 
-## 命令
+## 💬 命令
 
 | 命令 | 作用 |
 | --- | --- |
-| `/ping` | 连通性自检 |
+| `/ping` | 连通性检查 |
 | `/help` | 列出命令 |
 | `/status` | 会话状态 |
 | `/stop` | 取消当前生成 |
-| `/compact` | 压缩历史（旧消息摘要，省上下文） |
-| `/new` | 开新会话（旧会话历史保留，新消息走新 session） |
+| `/compact` | 把较早历史压缩成摘要省上下文 |
+| `/new` | 开启新会话（历史保留，下一条消息开新 session） |
 
-## 验证
+## 🏗️ 工作原理
 
-日志出现 `WeCom AI Bot authenticated` 后，给机器人发 `/ping`，应回 `pong`。
-
-## 状态服务
-
-运行期间，插件会向主机发布 `wecomChannelStatus` 服务，供面板与 UI 插件渲染实时
-健康状态，而无需触碰通道内部实现：
-
-```ts
-const status = ctx.get('wecomChannelStatus') // { snapshot(): ChannelStatus }
-const health = status.snapshot()
-// { connected: boolean, stopping: boolean, conversations: number,
-//   authenticatedAt: number | null, lastError: string | null }
+```
+企业微信 AI 机器人
+   │  WebSocket 长连接（wss://openws.work.weixin.qq.com）
+   ▼
+dsh-wecom（host 插件）
+   │  msgid 去重 → 访问策略 → 按会话排队 → 全局并发上限
+   │  创建/恢复 agent（setup 挂载 preset + 常驻指令段）
+   │  agent.followup(userMessage) → await agent.whenIdle()
+   │  超时 → agent.cancel()，不留僵尸轮次
+   ▼
+持久化的按会话 Harness agent（sessionPersistence）
 ```
 
-`snapshot()` 只返回纯标量字段，可以安全地放进 RPC 或 JSON。
+为什么不是裸 `agents.create`：preset 在 `setup` 挂载（裸 agent 没有工具）、指令经 `systemPrompt.section()` 每轮常驻、超时取消保证下一条消息不被卡住、群聊按 `chatid` 白名单控制、全局 `maxConcurrent` 兜底。
 
-## 浏览器界面
+## 🧩 集成
 
-本包自带浏览器客户端半端（通过 `dsh.client` 声明，由 web profile 以
-`/plugins/dsh-wecom/client.js` 下发，无需重建前端）。它提供：
+- **状态服务**——`ctx.get('wecomChannelStatus').snapshot()` 只返回标量（`connected`、`stopping`、`conversations`、`authenticatedAt`、`lastError`），供面板/UI 插件使用
+- **REST 路由**——`GET /api/wecom/status`（有 web server 时注册，JSON）；`POST /api/wecom/restart` 重连渠道
+- **浏览器 UI**——自带 client 半身（`/plugins/dsh-wecom/client.js` 提供，无需前端重建）：侧栏入口 + 连接状态圆点 + 每 5 秒轮询的浮动状态面板
 
-- **侧边栏底部的 WeCom 动作按钮**，带实时连接状态点；
-- 点击打开的**悬浮状态面板**（连接状态、会话数、认证时长、最近错误），
-  每五秒轮询一次。
-
-两者都消费主机半端注册的 `GET /api/wecom/status` JSON 路由（存在 web server
-时才注册）。客户端半端构建为 CommonJS 后，由 `scripts/wrap-client.mjs` 包装成
-web 模块加载器执行的 factory 形式。
-
-## 开发
+## 🧪 开发
 
 ```sh
 npm install --legacy-peer-deps
 npm run check   # biome + typecheck + test + build
 ```
 
-## 许可证
+## 📄 License
 
-MIT
+[MIT](LICENSE)
