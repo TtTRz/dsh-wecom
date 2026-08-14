@@ -244,6 +244,27 @@ describe('AgentPool', () => {
     expect(added).toEqual([created[0]?.sessionId])
   })
 
+  it('re-attaches persisted conversations to the workspace at startup', async () => {
+    const attached: string[] = []
+    const create = vi.fn(async () => ({
+      attachSession: vi.fn(async (sessionId: string) => {
+        attached.push(sessionId)
+      }),
+    }))
+    const { ctx } = makeHarness()
+    ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: 'dsh-wecom-single-abc' },
+      { id: 'dsh-wecom-group-xyz' },
+      { id: 'session-other' },
+    ])
+    ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+      name === 'workspaceRegistry' ? { create } : undefined,
+    )
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+    expect(attached).toEqual(['dsh-wecom-single-abc', 'dsh-wecom-group-xyz'])
+  })
+
   it('a failing attach never fails the message itself', async () => {
     const create = vi.fn(async () => ({
       attachSession: vi.fn(async () => {

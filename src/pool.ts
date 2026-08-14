@@ -62,11 +62,19 @@ export class AgentPool {
     await mkdir(this.config.cwd, { recursive: true })
     for (let attempt = 0; attempt < 4; attempt += 1) {
       try {
-        if ((await this.ensureWorkspace()) !== undefined) return
+        if ((await this.ensureWorkspace()) !== undefined) break
       } catch {
         // Transient registry race; retried below and lazily per message.
       }
       await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+    // Re-attach every conversation persisted by this plugin so conversations
+    // that predate a workspace-path change still regroup after a restart.
+    const workspace = await this.ensureWorkspace().catch(() => undefined)
+    if (workspace !== undefined) {
+      for (const id of this.persisted) {
+        if (id.startsWith('dsh-wecom-')) await this.groupSession(id)
+      }
     }
   }
 
