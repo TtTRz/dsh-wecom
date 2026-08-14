@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-15
+
 ### Added
 
 - Token-level streaming: model text and reasoning deltas are flushed to WeCom
@@ -63,3 +65,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Global concurrency cap (`maxConcurrent`).
 - Streaming reply ack + final answer.
 - Secret resolution via `ctx.credentials`.
+- Packaging: `prepare` script added so git installs build from source; `package-lock.json` re-synced with `package.json` (was missing four transitive deps, breaking `npm ci`).
+- Docs: install section documents the pnpm ≥10 `allowBuilds` authorization for git installs and the prebuilt-tarball alternative.

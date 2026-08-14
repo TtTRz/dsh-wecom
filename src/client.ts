@@ -372,7 +372,12 @@ export function apply(ctx: {
         ),
         React.createElement(
           'button',
-          { type: 'button', className: 'wecom-panel-btn', onClick: () => void restart(), disabled: restarting },
+          {
+            type: 'button',
+            className: 'wecom-panel-btn',
+            onClick: () => void restart(),
+            disabled: restarting,
+          },
           restarting ? 'Restarting…' : 'Restart',
         ),
       ),

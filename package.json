@@ -1,6 +1,6 @@
 {
   "name": "dsh-wecom",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "dsh-wecom: a WeCom AI Bot channel for DeepSeek Harness — each chat runs a persistent, preset-backed agent over the official long connection.",
   "type": "module",
   "main": "dist/index.js",
@@ -39,7 +39,8 @@
     "lint": "biome check .",
     "format": "biome format --write .",
     "check": "biome check . && npm run typecheck && npm run test && npm run build",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "prepare": "npm run build"
   },
   "keywords": [
     "deepseek",

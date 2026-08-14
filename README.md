@@ -42,11 +42,23 @@ persistent per-conversation Harness agent (sessionPersistence)
 dsh plugin --profile web add github:TtTRz/dsh-wecom
 ```
 
+> pnpm ≥10 refuses to run build scripts of git-hosted dependencies, so the first `add` fails with `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`. Add the exact package key pnpm prints to that profile's `pnpm-workspace.yaml` (usually `dsh-wecom`), then re-run `add`. This authorization lets package code run on your machine outside any sandbox — pin the commit: `github:TtTRz/dsh-wecom#<sha>`.
+>
+> To avoid authorization entirely, install from a prebuilt tarball instead:
+>
+> ```sh
+> git clone https://github.com/TtTRz/dsh-wecom && cd dsh-wecom
+> npm install && npm pack    # produces dsh-wecom-0.1.0.tgz
+> dsh plugin --profile web add ./dsh-wecom-0.1.0.tgz
+> ```
+
 Local checkout:
 
 ```sh
 dsh plugin --profile web add /absolute/path/to/dsh-wecom
 ```
+
+A local path install links the source directly and runs no build scripts; run `npm install && npm run build` first to produce `dist/`.
 
 ## Configure
 

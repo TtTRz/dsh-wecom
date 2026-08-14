@@ -42,11 +42,23 @@ dsh-wecom 插件（host 常驻）
 dsh plugin --profile web add github:TtTRz/dsh-wecom
 ```
 
+> pnpm ≥10 默认拒绝运行 git 依赖的构建脚本，首次 `add` 会失败并提示 `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`。按提示把 pnpm 打印的包键加入该 profile 的 `pnpm-workspace.yaml`（一般形如 `dsh-wecom`），然后重新执行 `add`。这份授权等于允许包代码在安装时于本机沙箱外执行，请锁定 commit：`github:TtTRz/dsh-wecom#<sha>`。
+>
+> 不想授权的话，改用 tarball 安装（预构建产物，无需构建授权）：
+>
+> ```sh
+> git clone https://github.com/TtTRz/dsh-wecom && cd dsh-wecom
+> npm install && npm pack    # 产出 dsh-wecom-0.1.0.tgz
+> dsh plugin --profile web add ./dsh-wecom-0.1.0.tgz
+> ```
+
 本地路径：
 
 ```sh
 dsh plugin --profile web add /absolute/path/to/dsh-wecom
 ```
+
+本地路径安装是直接链接源码，不会跑构建脚本，先执行 `npm install && npm run build` 产出 `dist/`。
 
 ## 配置
 

@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ChannelStatus } from '../src/channel.js'
-import { processView, registerRestartRoute, registerStatusRoute, statusPayload } from '../src/status.js'
+import {
+  processView,
+  registerRestartRoute,
+  registerStatusRoute,
+  statusPayload,
+} from '../src/status.js'
 
 const snapshot: ChannelStatus = {
   connected: true,
@@ -215,7 +220,10 @@ describe('registerRestartRoute', () => {
     const route = routes[0] as {
       kind: string
       path: string
-      handler: (req: unknown, res: { statusCode: number; body: string; setHeader(): void; end(b: string): void }) => void
+      handler: (
+        req: unknown,
+        res: { statusCode: number; body: string; setHeader(): void; end(b: string): void },
+      ) => void
     }
     expect(route.kind).toBe('exact')
     expect(route.path).toBe('/api/wecom/restart')
@@ -253,7 +261,10 @@ describe('registerRestartRoute', () => {
       throw new Error('no socket')
     })
     const route = routes[0] as {
-      handler: (req: unknown, res: { statusCode: number; body: string; setHeader(): void; end(b: string): void }) => void
+      handler: (
+        req: unknown,
+        res: { statusCode: number; body: string; setHeader(): void; end(b: string): void },
+      ) => void
     }
     const res = {
       statusCode: 0,
