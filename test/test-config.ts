@@ -9,6 +9,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     cwd: '/tmp/wecom-test',
     wsUrl: 'wss://openws.work.weixin.qq.com',
     preset: 'standard',
+    workspaceTitle: 'WeCom',
     dmPolicy: 'open',
     dmAllowlist: [],
     groupPolicy: 'open',
@@ -26,6 +27,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     replyLimitBytes: 20_000,
     dedupeLimit: 100,
     maxConcurrent: 4,
+    restartIntervalMs: 100,
     ...overrides,
   }
 }

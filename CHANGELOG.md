@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Restart loop (`runChannelLoop`): the channel restarts itself after every
+  unrecoverable end — auth failure, reconnect exhaustion, or replacement by
+  another client — after `restartIntervalMs` (default 10s), instead of leaving
+  a failed fiber and a dead bot.
+- Workspace grouping: the pool claims a workspace on `cwd` (title
+  `workspaceTitle`, default `WeCom`) and adds every WeCom conversation session
+  to it, so chats stop landing in the sidebar's "Ungrouped" bucket.
 - Host-wide `wecomChannelStatus` service exposing a scalar-only `snapshot()`
   (`connected`, `stopping`, `conversations`, `authenticatedAt`, `lastError`).
 - `GET /api/wecom/status` route (registered only when a web server is present)

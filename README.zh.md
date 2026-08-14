@@ -59,6 +59,11 @@ export WECOM_BOT_ID='你的 BotID'
 
 持久化时，把 `WECOM_BOT_ID` 写进 `~/.dsh/.env`（harness 启动时读取 user 层 `.env`），`WECOM_BOT_SECRET` 写进 `~/.dsh/.credentials.yaml`。`DSH_WECOM_CWD` 可覆盖 agent 工作目录。
 
+每个企微会话都会挂进基于 `cwd` 创建的 workspace（标题 `workspaceTitle`，默认
+`WeCom`），不再掉进侧边栏的"未分组"；把 `DSH_WECOM_CWD` 指向独立目录即可与
+你自己的会话分开。长连接一旦死掉（被踢、鉴权失败或被别的客户端顶替），通道会
+在 `restartIntervalMs`（默认 10 秒）后自动重启，不会留下死掉的机器人。
+
 在 `~/.dsh/profiles/web/cordis.patch.yml` 覆盖插件行：
 
 ```yaml

@@ -78,6 +78,8 @@ export class WecomChannel {
   private stopping = false
   private authenticatedAt: number | null = null
   private lastError: string | null = null
+  /** Resolved when the connection is unrecoverable or the channel stops. */
+  private dead = Promise.withResolvers<void>()
 
   constructor(
     private readonly ctx: Context,
@@ -94,6 +96,7 @@ export class WecomChannel {
 
   /** Connect and authenticate before accepting any traffic. */
   async start(): Promise<void> {
+    this.dead = Promise.withResolvers<void>()
     await this.pool.start()
     const resolved = await this.ctx.credentials.resolve(credentialRef(this.config.credentialName))
     if (resolved === undefined) {
@@ -135,6 +138,7 @@ export class WecomChannel {
       }
       if (error instanceof WSAuthFailureError || error instanceof WSReconnectExhaustedError) {
         rejectReady(error)
+        this.dead.resolve()
       }
     })
     client.on('event.disconnected_event', () => {
@@ -142,6 +146,8 @@ export class WecomChannel {
         this.lastError = 'Connection replaced by another client for this Bot ID'
         this.log.error(this.lastError)
       }
+      // Another client took the bot. Reclaim it: the owning loop restarts us.
+      this.dead.resolve()
     })
     client.on('message', async (frame) => this.onMessage(frame))
     client.on('event.enter_chat', async (frame) => this.greet(frame))
@@ -160,8 +166,14 @@ export class WecomChannel {
   async stop(): Promise<void> {
     if (this.stopping) return
     this.stopping = true
+    this.dead.resolve()
     this.client?.disconnect()
     await this.pool.dispose()
+  }
+
+  /** Resolves when the connection becomes unrecoverable or `stop()` runs. */
+  untilDead(): Promise<void> {
+    return this.dead.promise
   }
 
   /** Point-in-time health for dashboards; scalar fields only, no live objects. */

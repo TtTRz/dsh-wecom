@@ -11,3 +11,4 @@
         namespace: default
         cwd: !!js process.env.DSH_WECOM_CWD ?? process.cwd()
         preset: standard
+        workspaceTitle: WeCom

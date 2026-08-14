@@ -10,6 +10,8 @@ describe('Config', () => {
     expect(config.dmPolicy).toBe('open')
     expect(config.imageMode).toBe('auto')
     expect(config.turnTimeoutMs).toBe(300_000)
+    expect(config.workspaceTitle).toBe('WeCom')
+    expect(config.restartIntervalMs).toBe(10_000)
   })
 
   it('rejects missing required fields', () => {

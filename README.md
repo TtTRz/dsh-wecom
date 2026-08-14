@@ -59,6 +59,13 @@ export WECOM_BOT_ID='your-bot-id'
 
 To make it stick across restarts, write `WECOM_BOT_ID` into `~/.dsh/.env` (the user `.env` layer the harness loads at boot) and `WECOM_BOT_SECRET` into `~/.dsh/.credentials.yaml`. `DSH_WECOM_CWD` overrides the agent working directory.
 
+Every WeCom conversation is grouped under a workspace created on `cwd` (title
+`workspaceTitle`, default `WeCom`), so chats stay out of the sidebar's
+"Ungrouped" bucket. Point `DSH_WECOM_CWD` at a dedicated directory to keep
+them separate from your own sessions. When the long connection dies (kicked,
+auth failure, or replaced by another client), the channel restarts itself
+after `restartIntervalMs` (default 10s) — no dead bot, no manual restarts.
+
 Tune the mounted row in `~/.dsh/profiles/web/cordis.patch.yml`:
 
 ```yaml

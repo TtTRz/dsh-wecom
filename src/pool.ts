@@ -1,3 +1,4 @@
+import { mkdir } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentSetup } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
@@ -18,6 +19,14 @@ export interface Reply {
   text: string
 }
 
+/** Structural face of a workspace entity (absent outside web profiles). */
+interface WorkspaceLike {
+  addSession(sessionId: string): Promise<void>
+}
+interface WorkspaceRegistryLike {
+  create(path: string, title?: string): Promise<WorkspaceLike>
+}
+
 /**
  * One Harness agent per WeCom conversation: opened on first use, resumed from
  * persistence after restarts, and closed with the plugin. Each agent mounts a
@@ -30,6 +39,7 @@ export class AgentPool {
   private readonly epochs = new Map<string, number>()
   private readonly semaphore: Semaphore
   private persisted = new Set<string>()
+  private workspace: WorkspaceLike | undefined
 
   constructor(
     private readonly ctx: Context,
@@ -38,10 +48,19 @@ export class AgentPool {
     this.semaphore = new Semaphore(config.maxConcurrent)
   }
 
-  /** Load the already-persisted session ids so later opens can resume them. */
+  /**
+   * Load persisted session ids, make sure the agent cwd exists, and claim the
+   * workspace that groups every WeCom conversation in the web sidebar.
+   */
   async start(): Promise<void> {
     const headers = await this.ctx.sessionPersistence.list()
     this.persisted = new Set(headers.map((header) => String(header.id)))
+    await mkdir(this.config.cwd, { recursive: true })
+    const registry = this.ctx.get('workspaceRegistry') as WorkspaceRegistryLike | undefined
+    if (registry === undefined) return
+    // Workspace membership is validated by canonical cwd, so the workspace
+    // owns `cwd` itself and every agent runs there.
+    this.workspace = await registry.create(this.config.cwd, this.config.workspaceTitle)
   }
 
   /** Number of live conversation agents currently held. */
@@ -157,7 +176,13 @@ export class AgentPool {
     const setup = this.mountPreset(resolvedPreset)
 
     if (this.persisted.has(id)) {
-      return this.ctx.agents.resume({ resumeSessionId: sessionId, agentOptions, setup })
+      const handle = await this.ctx.agents.resume({
+        resumeSessionId: sessionId,
+        agentOptions,
+        setup,
+      })
+      await this.workspace?.addSession(id)
+      return handle
     }
 
     const handle = await this.ctx.agents.create({
@@ -167,6 +192,7 @@ export class AgentPool {
       setup,
     })
     this.persisted.add(id)
+    await this.workspace?.addSession(id)
     return handle
   }
 

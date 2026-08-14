@@ -35,6 +35,7 @@ function makeCtx() {
     logger: () => ({ debug() {}, info() {}, warn() {}, error() {} }),
     sessionPersistence: { list: vi.fn(async () => []) },
     credentials: { resolve: vi.fn(async () => ({ value: 'secret' })) },
+    get: vi.fn(() => undefined),
   }
 }
 
@@ -83,5 +84,19 @@ describe('WecomChannel status', () => {
     const { channel } = await makeRunningChannel()
     await channel.stop()
     expect(channel.snapshot()).toMatchObject({ stopping: true, connected: false })
+  })
+
+  it('untilDead resolves when the connection is replaced by another client', async () => {
+    const { channel, fire } = await makeRunningChannel()
+    const dead = channel.untilDead()
+    fire('event.disconnected_event')
+    await expect(dead).resolves.toBeUndefined()
+  })
+
+  it('untilDead resolves when the channel stops', async () => {
+    const { channel } = await makeRunningChannel()
+    const dead = channel.untilDead()
+    await channel.stop()
+    await expect(dead).resolves.toBeUndefined()
   })
 })

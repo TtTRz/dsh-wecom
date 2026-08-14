@@ -15,6 +15,12 @@ export interface Config {
   wsUrl: string
   /** Named preset mounted into each WeCom-driven agent (gives it tools + persona). */
   preset: string
+  /**
+   * Display title of the workspace that groups every WeCom conversation in the
+   * web sidebar. The workspace is created (when a workspace registry exists)
+   * on `cwd`, so WeCom sessions stop falling into the "Ungrouped" bucket.
+   */
+  workspaceTitle: string
   dmPolicy: AccessMode
   dmAllowlist: string[]
   groupPolicy: AccessMode
@@ -36,6 +42,8 @@ export interface Config {
   dedupeLimit: number
   /** Upper bound on concurrently running agent turns across all conversations. */
   maxConcurrent: number
+  /** Delay before the channel restarts after a dead or failed connection. */
+  restartIntervalMs: number
 }
 
 export const Config: z<Config> = z.object({
@@ -45,6 +53,7 @@ export const Config: z<Config> = z.object({
   cwd: z.string().required(),
   wsUrl: z.string().default('wss://openws.work.weixin.qq.com'),
   preset: z.string().default('standard'),
+  workspaceTitle: z.string().default('WeCom'),
   dmPolicy: z.union(['open', 'allowlist', 'disabled']).default('open'),
   dmAllowlist: z.array(z.string()).default([]),
   groupPolicy: z.union(['open', 'allowlist', 'disabled']).default('open'),
@@ -69,4 +78,6 @@ export const Config: z<Config> = z.object({
   replyLimitBytes: z.number().step(1).min(100).max(20_480).default(20_000),
   dedupeLimit: z.number().step(1).min(100).max(100_000).default(5_000),
   maxConcurrent: z.number().step(1).min(1).max(64).default(4),
+  /** Delay before the channel restarts after a dead or failed connection. */
+  restartIntervalMs: z.number().step(1).min(100).default(10_000),
 })

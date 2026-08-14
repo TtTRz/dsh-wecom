@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { type ChannelStatusService, WecomChannel } from './channel.js'
 import { Config, type Config as PluginConfig } from './config.js'
+import { runChannelLoop } from './loop.js'
 import { registerStatusRoute } from './status.js'
 
 export const name = 'dsh-wecom'
@@ -16,6 +17,7 @@ export const inject = [
 
 export type { ChannelStatus, ChannelStatusService } from './channel.js'
 export { clipUtf8, conversationId, Dedupe, replyTarget, Semaphore, timeout } from './helpers.js'
+export { runChannelLoop } from './loop.js'
 export {
   detectImageMediaType,
   type MediaPort,
@@ -38,8 +40,14 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
   // Browser UI + dashboards: `GET /api/wecom/status` (a no-op without a web server).
   ctx.effect(() => registerStatusRoute(ctx, () => channel.snapshot()), 'dsh-wecom.status-route')
   await ctx.effect(async function* () {
-    yield async () => channel.stop()
-    await channel.start()
+    let stopped = false
+    yield async () => {
+      stopped = true
+      await channel.stop()
+    }
+    // Restart the channel after every unrecoverable end so a kicked or
+    // replaced long connection always comes back instead of leaving a dead bot.
+    await runChannelLoop(channel, config.restartIntervalMs, ctx.logger('dsh-wecom'), () => stopped)
   }, 'dsh-wecom.websocket')
 }
 

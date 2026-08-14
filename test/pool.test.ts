@@ -85,6 +85,7 @@ function makeHarness() {
       ),
       get: vi.fn(),
     },
+    get: vi.fn(() => undefined),
   }
   return { ctx, mounts, sections, disposed, created }
 }
@@ -176,6 +177,7 @@ describe('AgentPool', () => {
         resume: vi.fn(),
         get: vi.fn(),
       },
+      get: vi.fn(() => undefined),
     }
     const manager = new AgentPool(ctx as never, testConfig({ turnTimeoutMs: 20 }))
     await manager.start()
@@ -184,5 +186,36 @@ describe('AgentPool', () => {
       'agent response timed out',
     )
     expect(hanging.cancel).toHaveBeenCalledWith({ kind: 'user' })
+  })
+
+  it('claims a workspace on cwd and adds every conversation session to it', async () => {
+    const added: string[] = []
+    const create = vi.fn(async (path: string, title: string) => ({
+      addSession: vi.fn(async (sessionId: string) => {
+        added.push(sessionId)
+      }),
+      path,
+      title,
+    }))
+    const { ctx, created } = makeHarness()
+    ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+      name === 'workspaceRegistry' ? { create } : undefined,
+    )
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+    expect(create).toHaveBeenCalledWith('/tmp/wecom-test', 'WeCom')
+
+    await manager.handle(singleMessage('one'), noopDownload)
+    expect(added).toEqual([created[0]?.sessionId])
+
+    await manager.forget(singleMessage('reset'))
+    await manager.handle(singleMessage('two'), noopDownload)
+    expect(added).toEqual([created[0]?.sessionId, created[1]?.sessionId])
+  })
+
+  it('skips workspace grouping when no registry exists', async () => {
+    const { ctx } = makeHarness()
+    const manager = new AgentPool(ctx as never, testConfig())
+    await expect(manager.start()).resolves.toBeUndefined()
   })
 })
