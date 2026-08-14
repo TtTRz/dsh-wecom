@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.4] - 2026-08-15
+## [0.1.5] - 2026-08-15
 
 ### Changed
 
@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `<think>` card (arguments previewed from their most informative field)
   instead of a markdown footer in the reply body, keeping the visible answer
   clean.
+
+## [0.1.4] - 2026-08-15
+
+> Superseded: the 0.1.4 npm tarball was published from a stale base that missed
+> the 0.1.2 changes; use 0.1.5 instead.
 
 ## [0.1.3] - 2026-08-15
 
