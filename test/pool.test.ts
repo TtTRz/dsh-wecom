@@ -8,7 +8,7 @@ import { testConfig } from './test-config.js'
 interface FakeAgent {
   status: 'idle' | 'running'
   options: { provider: string; model: string }
-  session: { events: unknown[] }
+  session: { id: string; events: unknown[] }
   ctx: {
     on: (event: string, handler: (...args: unknown[]) => void) => () => boolean
     systemPrompt: { section: ReturnType<typeof vi.fn> }
@@ -30,7 +30,7 @@ function makeAgent(
   const agent: FakeAgent = {
     status: 'idle',
     options: { provider: 'deepseek', model: 'deepseek-chat' },
-    session: { events },
+    session: { id: '', events },
     ctx: {
       on: (event: string, handler: (...args: unknown[]) => void) => {
         const set = handlers.get(event) ?? new Set<(...args: unknown[]) => void>()
@@ -72,13 +72,26 @@ function makeHarness() {
   const disposed: string[] = []
   const created: Array<{ sessionId: string }> = []
   const live = new Map<string, unknown>()
+  const handlers = new Map<string, Set<(...args: unknown[]) => void>>()
 
   const section = vi.fn((s: { name: string; order: number; text: string }) => {
     sections.push(s)
   })
 
+  const on = vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+    const set = handlers.get(event) ?? new Set<(...args: unknown[]) => void>()
+    set.add(handler)
+    handlers.set(event, set)
+    return () => set.delete(handler)
+  })
+
+  const fireSessionEvent = (session: unknown, event: unknown): void => {
+    for (const handler of handlers.get('session/event') ?? []) handler(session, event)
+  }
+
   const ctx = {
     logger: () => ({ debug() {}, info() {}, warn() {}, error() {} }),
+    on,
     sessionPersistence: { list: vi.fn(async () => []) },
     agentDefaultModel: {
       currentSelection: vi.fn(() => ({ provider: 'deepseek', model: 'deepseek-chat' })),
@@ -99,6 +112,7 @@ function makeHarness() {
         async (options: { sessionId: string; setup?: (agentCtx: unknown) => Promise<void> }) => {
           created.push({ sessionId: options.sessionId })
           const agent = makeAgent()
+          agent.session.id = options.sessionId
           if (options.setup) await options.setup({ systemPrompt: { section } })
           live.set(options.sessionId, agent)
           return {
@@ -116,6 +130,7 @@ function makeHarness() {
           setup?: (agentCtx: unknown) => Promise<void>
         }) => {
           const agent = makeAgent()
+          agent.session.id = options.resumeSessionId
           if (options.setup) await options.setup({ systemPrompt: { section } })
           live.set(options.resumeSessionId, agent)
           return {
@@ -130,7 +145,7 @@ function makeHarness() {
     },
     get: vi.fn(() => undefined),
   }
-  return { ctx, mounts, sections, disposed, created, live }
+  return { ctx, mounts, sections, disposed, created, live, fireSessionEvent }
 }
 
 function singleMessage(text = 'hello'): never {
@@ -239,6 +254,7 @@ describe('AgentPool', () => {
     const hanging = makeAgent({ hang: true })
     const ctx = {
       logger: () => ({ debug() {}, info() {}, warn() {}, error() {} }),
+      on: vi.fn(() => () => undefined),
       sessionPersistence: { list: vi.fn(async () => []) },
       agentDefaultModel: {
         currentSelection: vi.fn(() => ({ provider: 'deepseek', model: 'deepseek-chat' })),
@@ -378,7 +394,7 @@ describe('AgentPool', () => {
 
   it('prefixes a harness-generated LLM title with the userid for single chats', async () => {
     const renamed: string[] = []
-    const { ctx, live, created } = makeHarness()
+    const { ctx, live, created, fireSessionEvent } = makeHarness()
     ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
       name === 'sessionTitle'
         ? { rename: vi.fn((_session: unknown, title: string) => renamed.push(title)) }
@@ -389,21 +405,25 @@ describe('AgentPool', () => {
     await manager.handle(singleMessage('hello'), noopDownload)
     const agent = live.get(created[0]?.sessionId ?? '') as FakeAgent | undefined
     expect(agent).toBeDefined()
-    agent?.fire('session/event', agent.session, {
-      type: 'session/title',
-      data: {
-        title: '性能优化',
-        messageSeqs: [1],
-        source: { kind: 'provider', provider: 'session-title-first-prompt-llm' },
-      },
-    })
+    const titleEvent = (seq: number, source: unknown, title: string) => {
+      const event = {
+        type: 'session/title',
+        seq,
+        data: { title, messageSeqs: [1], source },
+      }
+      agent?.session.events.push(event)
+      fireSessionEvent(agent?.session, event)
+    }
+    // The deterministic fallback lands first and is left untouched.
+    titleEvent(10, { kind: 'fallback' }, 'hello')
+    titleEvent(11, { kind: 'provider', provider: 'session-title-first-prompt-llm' }, '性能优化')
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(renamed).toEqual(['u1：性能优化'])
   })
 
   it('uses the group chatid as the title prefix for group chats', async () => {
     const renamed: string[] = []
-    const { ctx, live, created } = makeHarness()
+    const { ctx, live, created, fireSessionEvent } = makeHarness()
     ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
       name === 'sessionTitle'
         ? { rename: vi.fn((_session: unknown, title: string) => renamed.push(title)) }
@@ -414,21 +434,24 @@ describe('AgentPool', () => {
     await manager.handle(groupMessage('hello'), noopDownload)
     const agent = live.get(created[0]?.sessionId ?? '') as FakeAgent | undefined
     expect(agent).toBeDefined()
-    agent?.fire('session/event', agent.session, {
+    const event = {
       type: 'session/title',
+      seq: 10,
       data: {
         title: '性能优化',
         messageSeqs: [1],
         source: { kind: 'provider', provider: 'session-title-first-prompt-llm' },
       },
-    })
+    }
+    agent?.session.events.push(event)
+    fireSessionEvent(agent?.session, event)
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(renamed).toEqual(['wrTestGroupChat：性能优化'])
   })
 
-  it('ignores fallback and user-sourced title events', async () => {
+  it('reverts a manual rename back to the canonical title', async () => {
     const renamed: string[] = []
-    const { ctx, live, created } = makeHarness()
+    const { ctx, live, created, fireSessionEvent } = makeHarness()
     ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
       name === 'sessionTitle'
         ? { rename: vi.fn((_session: unknown, title: string) => renamed.push(title)) }
@@ -438,20 +461,104 @@ describe('AgentPool', () => {
     await manager.start()
     await manager.handle(singleMessage('hello'), noopDownload)
     const agent = live.get(created[0]?.sessionId ?? '') as FakeAgent | undefined
-    agent?.fire('session/event', agent.session, {
+    const titleEvent = (seq: number, source: unknown, title: string) => {
+      const event = {
+        type: 'session/title',
+        seq,
+        data: { title, messageSeqs: [], source },
+      }
+      agent?.session.events.push(event)
+      fireSessionEvent(agent?.session, event)
+    }
+    titleEvent(10, { kind: 'provider', provider: 'session-title-first-prompt-llm' }, '性能优化')
+    titleEvent(11, { kind: 'user' }, '手动改名')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(renamed).toEqual(['u1：性能优化', 'u1：性能优化'])
+  })
+
+  it('reverts a manual rename of a legacy session to its previous title', async () => {
+    const renamed: string[] = []
+    const { ctx, live, created, fireSessionEvent } = makeHarness()
+    ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+      name === 'sessionTitle'
+        ? { rename: vi.fn((_session: unknown, title: string) => renamed.push(title)) }
+        : undefined,
+    )
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+    await manager.handle(singleMessage('hello'), noopDownload)
+    const agent = live.get(created[0]?.sessionId ?? '') as FakeAgent | undefined
+    // A legacy title from before the lock was introduced (not fired through
+    // the handler — it is already part of the log).
+    agent?.session.events.push({
       type: 'session/title',
-      data: { title: 'hello', messageSeqs: [1], source: { kind: 'fallback' } },
+      seq: 5,
+      data: { title: '旧标题', messageSeqs: [1], source: { kind: 'user' } },
     })
-    agent?.fire('session/event', agent.session, {
+    const rename = {
       type: 'session/title',
-      data: { title: '手动改名', messageSeqs: [], source: { kind: 'user' } },
-    })
+      seq: 6,
+      data: { title: '新名字', messageSeqs: [], source: { kind: 'user' } },
+    }
+    agent?.session.events.push(rename)
+    fireSessionEvent(agent?.session, rename)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(renamed).toEqual(['旧标题'])
+  })
+
+  it('passes through a rename that already matches the canonical title', async () => {
+    const renamed: string[] = []
+    const { ctx, live, created, fireSessionEvent } = makeHarness()
+    ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+      name === 'sessionTitle'
+        ? { rename: vi.fn((_session: unknown, title: string) => renamed.push(title)) }
+        : undefined,
+    )
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+    await manager.handle(singleMessage('hello'), noopDownload)
+    const agent = live.get(created[0]?.sessionId ?? '') as FakeAgent | undefined
+    const titleEvent = (seq: number, source: unknown, title: string) => {
+      const event = {
+        type: 'session/title',
+        seq,
+        data: { title, messageSeqs: [], source },
+      }
+      agent?.session.events.push(event)
+      fireSessionEvent(agent?.session, event)
+    }
+    titleEvent(10, { kind: 'provider', provider: 'session-title-first-prompt-llm' }, '性能优化')
+    titleEvent(11, { kind: 'user' }, 'u1：性能优化')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(renamed).toEqual(['u1：性能优化'])
+  })
+
+  it('ignores title events of non-WeCom sessions', async () => {
+    const renamed: string[] = []
+    const { ctx, live, created, fireSessionEvent } = makeHarness()
+    ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+      name === 'sessionTitle'
+        ? { rename: vi.fn((_session: unknown, title: string) => renamed.push(title)) }
+        : undefined,
+    )
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+    await manager.handle(singleMessage('hello'), noopDownload)
+    const agent = live.get(created[0]?.sessionId ?? '') as FakeAgent | undefined
+    const other = { id: 'session-abc', events: [] }
+    const event = {
+      type: 'session/title',
+      seq: 1,
+      data: { title: '别的会话', messageSeqs: [], source: { kind: 'user' } },
+    }
+    fireSessionEvent(other, event)
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(renamed).toEqual([])
+    expect(agent).toBeDefined()
   })
 
   it('a failing title rewrite never fails the turn', async () => {
-    const { ctx, live, created } = makeHarness()
+    const { ctx, live, created, fireSessionEvent } = makeHarness()
     ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
       name === 'sessionTitle'
         ? {
@@ -465,14 +572,17 @@ describe('AgentPool', () => {
     await manager.start()
     await manager.handle(singleMessage('hello'), noopDownload)
     const agent = live.get(created[0]?.sessionId ?? '') as FakeAgent | undefined
-    agent?.fire('session/event', agent.session, {
+    const event = {
       type: 'session/title',
+      seq: 10,
       data: {
         title: '性能优化',
         messageSeqs: [1],
         source: { kind: 'provider', provider: 'session-title-first-prompt-llm' },
       },
-    })
+    }
+    agent?.session.events.push(event)
+    fireSessionEvent(agent?.session, event)
     await new Promise((resolve) => setTimeout(resolve, 0))
     await expect(manager.handle(singleMessage('again'), noopDownload)).resolves.toEqual({
       text: 'Harness reply',
@@ -511,6 +621,7 @@ describe('AgentPool', () => {
     })
     const ctx = {
       logger: () => ({ debug() {}, info() {}, warn() {}, error() {} }),
+      on: vi.fn(() => () => undefined),
       sessionPersistence: { list: vi.fn(async () => []) },
       agentDefaultModel: {
         currentSelection: vi.fn(() => ({ provider: 'deepseek', model: 'deepseek-chat' })),
@@ -566,6 +677,7 @@ describe('AgentPool', () => {
     })
     const ctx = {
       logger: () => ({ debug() {}, info() {}, warn() {}, error() {} }),
+      on: vi.fn(() => () => undefined),
       sessionPersistence: { list: vi.fn(async () => []) },
       agentDefaultModel: {
         currentSelection: vi.fn(() => ({ provider: 'deepseek', model: 'deepseek-chat' })),
@@ -602,6 +714,7 @@ describe('AgentPool', () => {
     const create = vi.fn()
     const ctx = {
       logger: () => ({ debug() {}, info() {}, warn() {}, error() {} }),
+      on: vi.fn(() => () => undefined),
       sessionPersistence: { list: vi.fn(async () => []) },
       agentDefaultModel: {
         currentSelection: vi.fn(() => ({ provider: 'deepseek', model: 'deepseek-chat' })),

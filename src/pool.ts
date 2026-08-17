@@ -7,7 +7,7 @@ import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-attachment'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { type SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
+import { type Session, type SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { BaseMessage } from '@wecom/aibot-node-sdk'
@@ -99,6 +99,8 @@ export class AgentPool {
   private persisted = new Set<string>()
   /** Title prefix per conversation: the userid for single chats, the chatid for groups. */
   private readonly titlePrefixes = new Map<string, string>()
+  /** Canonical title per conversation, enforced against manual renames. */
+  private readonly canonicalTitles = new Map<string, string>()
   private workspacePromise: Promise<WorkspaceLike | undefined> | undefined
 
   constructor(
@@ -107,6 +109,14 @@ export class AgentPool {
   ) {
     this.log = ctx.logger('dsh-wecom')
     this.semaphore = new Semaphore(config.maxConcurrent)
+    // Lock WeCom session titles host-wide: observe every title event, prefix
+    // harness-generated LLM titles, and revert manual renames. A host-level
+    // listener (not per-agent) covers sessions resumed outside this pool —
+    // e.g. the web UI opening a conversation or the API renaming a closed
+    // session. Cordis disposes it with the plugin fiber.
+    ctx.on('session/event', (session, event) => {
+      this.enforceSessionTitle(session, event)
+    })
   }
 
   /**
@@ -201,36 +211,71 @@ export class AgentPool {
   }
 
   /**
-   * Prefix harness-generated LLM titles with the conversation's title prefix.
-   * Reacting only to `provider` titles matters: renaming on the earlier
-   * deterministic fallback would supersede the harness's pending LLM
-   * generation and the short LLM title would never land. User-sourced titles
-   * (manual renames in the web UI, or our own rewrite) are ignored, so the
-   * prefix never fights the user. The rewrite is deferred off the append
-   * broadcast and is best-effort: a missing service or rename failure never
-   * fails the turn.
+   * Enforce the canonical title of one WeCom session. Harness-generated
+   * titles (deterministic fallback and LLM provider) are tracked; the LLM one
+   * is rewritten as "prefix：标题" (userid for single chats, chatid for
+   * groups). Manual renames in the web UI append a user-sourced title that
+   * differs from the canonical one — those are reverted, so WeCom sessions
+   * cannot be renamed. Our own rewrites carry the canonical text and pass
+   * through untouched. All rewrites are deferred off the append broadcast and
+   * best-effort: a missing service or rename failure never fails the turn.
    */
-  private watchSessionTitles(agent: Agent, id: string): void {
-    void agent.ctx.on('session/event', (_session, event: SessionEvent) => {
-      const type = event.type as string
-      if (type !== 'session/title') return
-      const { title, source } = event.data as {
-        title?: unknown
-        source?: { kind?: unknown }
-      }
-      if (source?.kind !== 'provider' || typeof title !== 'string') return
+  private enforceSessionTitle(session: Session, event: SessionEvent): void {
+    const id = session.id
+    if (!id.startsWith('dsh-wecom-')) return
+    const type = event.type as string
+    if (type !== 'session/title') return
+    const { title, source } = event.data as {
+      title?: unknown
+      source?: { kind?: unknown }
+    }
+    if (typeof title !== 'string') return
+    const kind = source?.kind
+    if (kind === 'provider') {
       const prefix = this.titlePrefixes.get(id)
-      if (prefix === undefined) return
-      const prefixed = `${prefix}：${title}`
-      void Promise.resolve().then(() => {
-        try {
-          const sessionTitle = this.ctx.get('sessionTitle') as SessionTitleLike | undefined
-          if (sessionTitle === undefined) return
-          sessionTitle.rename(_session, prefixed)
-        } catch (error) {
-          this.log.error('WeCom session title prefix failed: %s', String(error))
-        }
-      })
+      const canonical = prefix === undefined ? title : `${prefix}：${title}`
+      this.canonicalTitles.set(id, canonical)
+      if (prefix !== undefined) this.renameSession(session, canonical)
+      return
+    }
+    if (kind === 'fallback') {
+      this.canonicalTitles.set(id, title)
+      return
+    }
+    if (kind === 'user') {
+      let canonical = this.canonicalTitles.get(id)
+      if (canonical === undefined) {
+        canonical = this.previousTitle(session.events, event.seq) ?? title
+      }
+      this.canonicalTitles.set(id, canonical)
+      if (title !== canonical) this.renameSession(session, canonical)
+    }
+  }
+
+  /** Latest `session/title` text strictly before one event seq, if any. */
+  private previousTitle(events: readonly SessionEvent[], seq: number): string | undefined {
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]
+      if (event === undefined) continue
+      if (event.seq >= seq) continue
+      const type = event.type as string
+      if (type !== 'session/title') continue
+      const { title } = event.data as { title?: unknown }
+      return typeof title === 'string' ? title : undefined
+    }
+    return undefined
+  }
+
+  /** Best-effort deferred rename of a live WeCom session. */
+  private renameSession(session: Session, title: string): void {
+    void Promise.resolve().then(() => {
+      try {
+        const sessionTitle = this.ctx.get('sessionTitle') as SessionTitleLike | undefined
+        if (sessionTitle === undefined) return
+        sessionTitle.rename(session, title)
+      } catch (error) {
+        this.log.error('WeCom session title enforcement failed: %s', String(error))
+      }
     })
   }
 
@@ -529,7 +574,6 @@ export class AgentPool {
     const live = this.ctx.agents.get(sessionId)
     if (live !== undefined) {
       this.mountWecomInstructions(live)
-      this.watchSessionTitles(live, id)
       return { agent: live, dispose: async () => undefined }
     }
 
@@ -543,7 +587,6 @@ export class AgentPool {
         agentOptions,
         setup,
       })
-      this.watchSessionTitles(handle.agent, id)
       await this.groupSession(id)
       return handle
     }
@@ -554,7 +597,6 @@ export class AgentPool {
       agentOptions,
       setup,
     })
-    this.watchSessionTitles(handle.agent, id)
     this.persisted.add(id)
     await this.groupSession(id)
     return handle

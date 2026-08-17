@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.18] - 2026-08-17
+
+### Changed
+
+- WeCom session titles are now locked: the plugin watches every `session/title`
+  event host-wide (so it covers sessions resumed outside the pool, e.g. the
+  web UI or the rename API) and reverts manual renames back to the canonical
+  title — the prefixed harness-generated LLM title, or a legacy session's
+  existing title. Renames that already match the canonical title pass
+  through. The enforcement is best-effort and never fails a turn.
+
 ## [0.1.17] - 2026-08-17
 
 ### Changed

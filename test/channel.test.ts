@@ -33,6 +33,7 @@ function makeClient() {
 function makeCtx() {
   return {
     logger: () => ({ debug() {}, info() {}, warn() {}, error() {} }),
+    on: vi.fn(() => () => undefined),
     sessionPersistence: { list: vi.fn(async () => []) },
     credentials: { resolve: vi.fn(async () => ({ value: 'secret' })) },
     get: vi.fn(() => undefined),
@@ -169,6 +170,7 @@ describe('WecomChannel streaming', () => {
     }
     const ctx = {
       logger: () => ({ debug() {}, info() {}, warn() {}, error() {} }),
+      on: vi.fn(() => () => undefined),
       sessionPersistence: { list: vi.fn(async () => []) },
       credentials: { resolve: vi.fn(async () => ({ value: 'secret' })) },
       agentDefaultModel: { currentSelection: vi.fn(() => ({ provider: 'p', model: 'm' })) },
