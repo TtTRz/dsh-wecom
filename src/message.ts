@@ -25,11 +25,20 @@ export async function toContentBlocks(
   media: MediaPort,
   includeImages: boolean,
 ): Promise<ContentBlock[]> {
-  const scope = message.chattype === 'group' ? 'WeCom group' : 'WeCom private chat'
-  const parts = [`[${scope} message from WeCom user ${message.from.userid}]`]
+  const parts: string[] = []
   const images: ImageContent[] = []
   await readBody(message, parts, images, media)
   readQuote(message, parts, images)
+
+  // Label the message with its sender: "[userid]：text" on one line. The
+  // full-width colon is deliberate — an ASCII colon after a bracket would
+  // parse as a Markdown link reference and vanish from rendered bubbles.
+  const sender = message.from.userid
+  if (parts.length > 0) {
+    parts[0] = `[${sender}]：${parts[0]}`
+  } else {
+    parts.push(`[${sender}]`)
+  }
 
   const blocks: ContentBlock[] = []
   const selected = images.slice(0, media.limits.maxImages)

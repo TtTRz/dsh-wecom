@@ -28,14 +28,12 @@ function makeMedia() {
 }
 
 describe('toContentBlocks', () => {
-  it('wraps a text message with scope and the full sender userid', async () => {
+  it('labels a text message with a compact [userid]： prefix', async () => {
     const { media } = makeMedia()
     const blocks = await toContentBlocks(textMessage('hello'), media, true)
     expect(blocks).toHaveLength(1)
     const text = (blocks[0] as { type: 'text'; text: string }).text
-    expect(text).toContain('WeCom private chat')
-    expect(text).toContain('message from WeCom user u1')
-    expect(text).toContain('hello')
+    expect(text).toBe('[u1]：hello')
   })
 
   it('does not truncate long userids', async () => {
@@ -45,17 +43,13 @@ describe('toContentBlocks', () => {
       from: { userid: 'zhangsan.very.long.id' },
     }
     const blocks = await toContentBlocks(message as never, media, true)
-    expect((blocks[0] as { text: string }).text).toContain(
-      'message from WeCom user zhangsan.very.long.id',
-    )
+    expect((blocks[0] as { text: string }).text).toBe('[zhangsan.very.long.id]：hello')
   })
 
-  it('labels group messages', async () => {
+  it('uses the same compact prefix for group messages', async () => {
     const { media } = makeMedia()
     const blocks = await toContentBlocks(textMessage('hi', 'group'), media, true)
-    const text = (blocks[0] as { text: string }).text
-    expect(text).toContain('WeCom group')
-    expect(text).toContain('message from WeCom user u1')
+    expect((blocks[0] as { text: string }).text).toBe('[u1]：hi')
   })
 
   it('passes voice transcription through', async () => {
