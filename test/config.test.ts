@@ -1,5 +1,9 @@
-import { describe, expect, it } from 'vitest'
-import { Config } from '../src/config.js'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
+import { Config, resolveCwd } from '../src/config.js'
+
+const ENV = 'DSH_WECOM_CWD'
 
 describe('Config', () => {
   it('applies defaults for optional fields', () => {
@@ -14,12 +18,48 @@ describe('Config', () => {
     expect(config.restartIntervalMs).toBe(10_000)
   })
 
+  it('accepts a missing cwd (resolved later by resolveCwd)', () => {
+    expect(Config({ botId: 'b' } as never).cwd).toBeUndefined()
+  })
+
   it('rejects missing required fields', () => {
-    expect(() => Config({ botId: 'b' } as never)).toThrow()
     expect(() => Config({ cwd: '/tmp' } as never)).toThrow()
   })
 
   it('rejects an unknown access policy', () => {
     expect(() => Config({ botId: 'b', cwd: '/tmp', dmPolicy: 'nope' } as never)).toThrow()
+  })
+})
+
+describe('resolveCwd', () => {
+  const original = process.env[ENV]
+  afterEach(() => {
+    if (original === undefined) delete process.env[ENV]
+    else process.env[ENV] = original
+  })
+
+  it('defaults to ~/.wecom-sessions when nothing else is set', () => {
+    delete process.env[ENV]
+    expect(resolveCwd()).toBe(join(homedir(), '.wecom-sessions'))
+  })
+
+  it('prefers the explicit configured value over the environment', () => {
+    process.env[ENV] = '/tmp/env-cwd'
+    expect(resolveCwd('/tmp/row-cwd')).toBe('/tmp/row-cwd')
+  })
+
+  it('uses the environment override when no row value is given', () => {
+    process.env[ENV] = '/tmp/env-cwd'
+    expect(resolveCwd()).toBe('/tmp/env-cwd')
+  })
+
+  it('rejects a relative configured value', () => {
+    delete process.env[ENV]
+    expect(() => resolveCwd('.wecom-sessions')).toThrow(/cwd must be absolute/)
+  })
+
+  it('rejects a relative environment value', () => {
+    process.env[ENV] = 'relative/path'
+    expect(() => resolveCwd()).toThrow(/cwd must be absolute/)
   })
 })

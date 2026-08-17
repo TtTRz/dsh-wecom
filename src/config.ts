@@ -1,3 +1,5 @@
+import { homedir } from 'node:os'
+import { isAbsolute, join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 
 /** Access policy for one WeCom chat scope. */
@@ -6,12 +8,30 @@ export type AccessMode = 'open' | 'allowlist' | 'disabled'
 /** How inbound images are presented to the selected model. */
 export type ImageMode = 'auto' | 'always' | 'never'
 
-/** Runtime-validated plugin configuration. */
+/**
+ * Resolve the agent working directory: explicit row config wins, then the
+ * `DSH_WECOM_CWD` environment override, then the default `~/.wecom-sessions`
+ * so WeCom state and uploads stay out of the process cwd. The result must be
+ * absolute; a relative override rejects loudly instead of drifting.
+ */
+export function resolveCwd(configured?: string): string {
+  const cwd = configured ?? process.env.DSH_WECOM_CWD ?? join(homedir(), '.wecom-sessions')
+  if (!isAbsolute(cwd)) {
+    throw new Error(`dsh-wecom: cwd must be absolute, got ${JSON.stringify(cwd)}`)
+  }
+  return cwd
+}
+
+/** Runtime-validated plugin configuration as declared in a composition row. */
 export interface Config {
   botId: string
   credentialName: string
   namespace: string
-  cwd: string
+  /**
+   * Agent working directory, optional in the row. Resolved by {@link resolveCwd}
+   * at apply time: explicit value → `DSH_WECOM_CWD` → `~/.wecom-sessions`.
+   */
+  cwd?: string
   wsUrl: string
   /** Named preset mounted into each WeCom-driven agent (gives it tools + persona). */
   preset: string
@@ -54,11 +74,14 @@ export interface Config {
   restartIntervalMs: number
 }
 
+/** Fully resolved runtime config: `cwd` is absolute and non-optional. */
+export type ResolvedConfig = Omit<Config, 'cwd'> & { cwd: string }
+
 export const Config: z<Config> = z.object({
   botId: z.string().required(),
   credentialName: z.string().default('WECOM_BOT_SECRET'),
   namespace: z.string().default('default'),
-  cwd: z.string().required(),
+  cwd: z.string(),
   wsUrl: z.string().default('wss://openws.work.weixin.qq.com'),
   preset: z.string().default('standard'),
   workspaceTitle: z.string().default('WeCom'),

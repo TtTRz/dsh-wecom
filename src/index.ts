@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { type ChannelStatusService, WecomChannel } from './channel.js'
-import { Config, type Config as PluginConfig } from './config.js'
+import { Config, type Config as PluginConfig, type ResolvedConfig, resolveCwd } from './config.js'
 import { runChannelLoop } from './loop.js'
 import { registerRestartRoute, registerStatusRoute } from './status.js'
 
@@ -16,6 +16,7 @@ export const inject = [
 ]
 
 export type { ChannelStatus, ChannelStatusService } from './channel.js'
+export type { ResolvedConfig } from './config.js'
 export { clipUtf8, conversationId, Dedupe, replyTarget, Semaphore, timeout } from './helpers.js'
 export { runChannelLoop } from './loop.js'
 export {
@@ -33,11 +34,12 @@ export {
   statusPayload,
 } from './status.js'
 export type { PluginConfig as ChannelConfig }
-export { Config, WecomChannel }
+export { Config, resolveCwd, WecomChannel }
 
 /** Mount the WeCom long connection and tie teardown to the Cordis lifecycle. */
 export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
-  const channel = new WecomChannel(ctx, config)
+  const resolved: ResolvedConfig = { ...config, cwd: resolveCwd(config.cwd) }
+  const channel = new WecomChannel(ctx, resolved)
   // Published host-wide so dashboards and UI plugins can render live status
   // without reaching into channel internals. Scoped to this plugin's fiber.
   const status: ChannelStatusService = { snapshot: () => channel.snapshot() }
@@ -54,7 +56,12 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
     }
     // Restart the channel after every unrecoverable end so a kicked or
     // replaced long connection always comes back instead of leaving a dead bot.
-    await runChannelLoop(channel, config.restartIntervalMs, ctx.logger('dsh-wecom'), () => stopped)
+    await runChannelLoop(
+      channel,
+      resolved.restartIntervalMs,
+      ctx.logger('dsh-wecom'),
+      () => stopped,
+    )
   }, 'dsh-wecom.websocket')
 }
 

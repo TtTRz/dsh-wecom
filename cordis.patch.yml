@@ -1,7 +1,12 @@
 # dsh-wecom: mount one WeCom AI Bot long connection per plugin instance.
 #
 # `insert` appends a host-level plugin row. Override any field (policy, preset,
-# timeouts, wsUrl) in the target profile's `cordis.patch.yml`.
+# timeouts, wsUrl, cwd) in the target profile's `cordis.patch.yml`.
+#
+# `cwd` is deliberately omitted: it resolves at apply time to
+# $DSH_WECOM_CWD, falling back to ~/.wecom-sessions, so WeCom state and
+# uploads never land in the process cwd. Set a fixed absolute path here to
+# pin the agent working directory.
 - insert:
     - id: wecom-channel
       name: dsh-wecom
@@ -9,6 +14,5 @@
         botId: !!js process.env.WECOM_BOT_ID
         credentialName: WECOM_BOT_SECRET
         namespace: default
-        cwd: !!js process.env.DSH_WECOM_CWD ?? process.cwd()
         preset: standard
         workspaceTitle: WeCom

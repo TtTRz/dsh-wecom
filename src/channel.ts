@@ -14,7 +14,7 @@ import {
   type WsFrame,
   type WsFrameHeaders,
 } from '@wecom/aibot-node-sdk'
-import type { Config } from './config.js'
+import type { ResolvedConfig } from './config.js'
 import { clipUtf8, Dedupe, timeout } from './helpers.js'
 import { AgentPool, type Reply } from './pool.js'
 
@@ -183,7 +183,7 @@ export class WecomChannel {
 
   constructor(
     private readonly ctx: Context,
-    private readonly config: Config,
+    private readonly config: ResolvedConfig,
     private readonly clientFactory: BotClientFactory = (options) => new WSClient(options),
   ) {
     if (!isAbsolute(config.cwd)) {

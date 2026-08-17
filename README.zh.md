@@ -63,7 +63,8 @@ dsh plugin --profile web add ./dsh-wecom-0.1.5.tgz
     botId: !!js process.env.WECOM_BOT_ID
     credentialName: WECOM_BOT_SECRET
     namespace: default
-    cwd: !!js process.env.DSH_WECOM_CWD ?? process.cwd()
+    # cwd 可选：默认 ~/.wecom-sessions（可用环境变量 DSH_WECOM_CWD 覆盖）
+    cwd: /data/wecom
     preset: standard
     dmPolicy: open
     dmAllowlist: []
@@ -74,6 +75,7 @@ dsh plugin --profile web add ./dsh-wecom-0.1.5.tgz
 
 | 字段 | 默认 | 含义 |
 | --- | --- | --- |
+| `cwd` | `~/.wecom-sessions` | agent 工作目录：WeCom 会话、上传文件（`.wecom-uploads/`）与 `.dsh-wecom-state.json` 都落在这里，侧边栏 "WeCom" 工作区也认领在该目录上；可用 `DSH_WECOM_CWD` 覆盖，必须为绝对路径 |
 | `preset` | `standard` | 挂进每个会话 agent 的 preset |
 | `dmPolicy` / `groupPolicy` | `open` | `open` / `allowlist` / `disabled` |
 | `dmAllowlist` | `[]` | 单聊 userid 白名单 |

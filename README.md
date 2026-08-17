@@ -64,7 +64,8 @@ Tune the mounted row in `~/.dsh/profiles/web/cordis.patch.yml`:
     botId: !!js process.env.WECOM_BOT_ID
     credentialName: WECOM_BOT_SECRET
     namespace: default
-    cwd: !!js process.env.DSH_WECOM_CWD ?? process.cwd()
+    # cwd is optional: defaults to ~/.wecom-sessions (DSH_WECOM_CWD overrides)
+    cwd: /data/wecom
     preset: standard
     dmPolicy: open
     dmAllowlist: []
@@ -75,6 +76,7 @@ Tune the mounted row in `~/.dsh/profiles/web/cordis.patch.yml`:
 
 | Field | Default | Meaning |
 | --- | --- | --- |
+| `cwd` | `~/.wecom-sessions` | Agent working directory: WeCom sessions, uploads (`.wecom-uploads/`), and `.dsh-wecom-state.json` live here; the sidebar workspace "WeCom" is claimed on it. `DSH_WECOM_CWD` overrides it. Must be absolute |
 | `preset` | `standard` | Preset mounted into each conversation agent |
 | `dmPolicy` / `groupPolicy` | `open` | `open` / `allowlist` / `disabled` |
 | `dmAllowlist` | `[]` | Single-chat userid allowlist |

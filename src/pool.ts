@@ -11,7 +11,7 @@ import { type SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { BaseMessage } from '@wecom/aibot-node-sdk'
-import type { Config } from './config.js'
+import type { ResolvedConfig } from './config.js'
 import { conversationId, Semaphore, timeout } from './helpers.js'
 import { type MediaPort, safeFilename, saveUploadFile } from './media.js'
 import { containsImageMedia, toContentBlocks } from './message.js'
@@ -105,7 +105,7 @@ export class AgentPool {
 
   constructor(
     private readonly ctx: Context,
-    private readonly config: Config,
+    private readonly config: ResolvedConfig,
   ) {
     this.log = ctx.logger('dsh-wecom')
     this.semaphore = new Semaphore(config.maxConcurrent)

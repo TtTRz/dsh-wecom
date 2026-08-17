@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.13] - 2026-08-17
+
+### Changed
+
+- Agent working directory (`cwd`) now defaults to `~/.wecom-sessions` instead
+  of the process cwd, keeping WeCom sessions, uploads, and state files out of
+  wherever `dsh web` was launched. The field is optional in the row config;
+  resolution order is explicit `cwd` → `DSH_WECOM_CWD` environment override →
+  `~/.wecom-sessions`, and a relative value rejects loudly. Existing persisted
+  conversations keep their stored cwd (they stay under the old workspace until
+  `/new` starts a fresh session in the new directory).
+
 ## [0.1.12] - 2026-08-17
 
 ### Changed

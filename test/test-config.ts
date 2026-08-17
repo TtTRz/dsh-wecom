@@ -1,7 +1,7 @@
-import type { Config } from '../src/config.js'
+import type { Config, ResolvedConfig } from '../src/config.js'
 
 /** Complete deterministic plugin config for unit tests. */
-export function testConfig(overrides: Partial<Config> = {}): Config {
+export function testConfig(overrides: Partial<Config> = {}): ResolvedConfig {
   return {
     botId: 'test-bot',
     credentialName: 'WECOM_BOT_SECRET',
