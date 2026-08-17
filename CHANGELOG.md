@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-08-17
+
+### Changed
+
+- Sidebar-foot WeCom button polish: slightly more line height/padding, and a
+  live count pill next to the "WeCom" label showing the number of currently
+  running WeCom conversations.
+
 ## [0.1.10] - 2026-08-17
 
 ### Fixed

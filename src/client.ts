@@ -85,8 +85,10 @@ export function agentLabel(agent: { sessionId: string; wecom: boolean }): string
 }
 
 const CSS = [
-  '.wecom-nav-btn{display:flex;align-items:center;gap:6px;cursor:pointer;background:transparent;border:none;color:var(--dsw-alias-label-secondary);padding:6px 10px;border-radius:8px;font-size:13px}',
+  '.wecom-nav-btn{display:flex;align-items:center;gap:6px;cursor:pointer;background:transparent;border:none;color:var(--dsw-alias-label-secondary);padding:7px 12px;border-radius:8px;font-size:13px;line-height:20px}',
   '.wecom-nav-btn:hover{background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary)}',
+  '.wecom-nav-label{display:flex;align-items:center;gap:6px}',
+  '.wecom-nav-count{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--dsw-alias-fill-secondary);color:var(--dsw-alias-label-primary);font-size:11px;font-weight:600;line-height:1}',
   '.wecom-dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none}',
   '.wecom-panel{position:fixed;right:16px;bottom:16px;width:320px;max-height:70vh;overflow:auto;z-index:9999;pointer-events:auto;background:var(--dsw-alias-bg-overlay);border:1px solid var(--dsw-alias-border-l1);border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,0.25);padding:14px 16px;font-size:13px;color:var(--dsw-alias-label-primary)}',
   '.wecom-panel-head{display:flex;align-items:center;justify-content:space-between;font-weight:600;margin-bottom:6px}',
@@ -176,6 +178,8 @@ export function apply(ctx: {
       : status === null
         ? 'var(--dsw-alias-label-secondary)'
         : 'var(--dsw-alias-state-warn-primary)'
+    const running = (status?.agents ?? []).filter((agent) => agent.wecom && agent.status === 'running').length
+    const showCount = status !== null && status.available === true
     return React.createElement(
       'button',
       {
@@ -185,7 +189,16 @@ export function apply(ctx: {
         onClick: () => setOpen(!store.open),
       },
       React.createElement('span', { className: 'wecom-dot', style: { background: color } }),
-      props.wide === true ? 'WeCom' : null,
+      props.wide === true
+        ? React.createElement(
+            'span',
+            { className: 'wecom-nav-label' },
+            'WeCom',
+            showCount
+              ? React.createElement('span', { className: 'wecom-nav-count' }, String(running))
+              : null,
+          )
+        : null,
     )
   }
 
