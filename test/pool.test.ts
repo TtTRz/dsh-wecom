@@ -16,6 +16,7 @@ interface FakeAgent {
   cancel: ReturnType<typeof vi.fn>
   followup: ReturnType<typeof vi.fn>
   whenIdle: ReturnType<typeof vi.fn>
+  fire: (event: string, ...args: unknown[]) => void
 }
 
 function makeAgent(
@@ -60,6 +61,7 @@ function makeAgent(
       agent.status = 'idle'
       return Promise.resolve()
     }),
+    fire,
   }
   return agent
 }
@@ -347,44 +349,97 @@ describe('AgentPool', () => {
     })
   })
 
-  it('titles an untitled conversation once, from its first message', async () => {
-    const renamed: string[] = []
-    let titled = false
-    const { ctx } = makeHarness()
-    ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) => {
-      if (name === 'sessionTitle') {
-        return {
-          get: vi.fn(() => (titled ? { title: 'x' } : undefined)),
-          rename: vi.fn((_session: unknown, title: string) => {
-            renamed.push(title)
-            titled = true
-          }),
-        }
-      }
-      return undefined
-    })
-    const manager = new AgentPool(ctx as never, testConfig())
-    await manager.start()
-    await manager.handle(singleMessage('hello world'), noopDownload)
-    await manager.handle(singleMessage('second message'), noopDownload)
-    expect(renamed).toEqual(['hello world'])
-  })
-
-  it('clips long titles to a compact one-liner', async () => {
+  it('leaves new conversations untitled instead of renaming from the first message', async () => {
     const renamed: string[] = []
     const { ctx } = makeHarness()
     ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
       name === 'sessionTitle'
+        ? { rename: vi.fn((_session: unknown, title: string) => renamed.push(title)) }
+        : undefined,
+    )
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+    await manager.handle(singleMessage('hello world'), noopDownload)
+    await manager.handle(singleMessage('second message'), noopDownload)
+    expect(renamed).toEqual([])
+  })
+
+  it('prefixes a harness-generated LLM title with the WeCom sender userid', async () => {
+    const renamed: string[] = []
+    const { ctx, live, created } = makeHarness()
+    ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+      name === 'sessionTitle'
+        ? { rename: vi.fn((_session: unknown, title: string) => renamed.push(title)) }
+        : undefined,
+    )
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+    await manager.handle(singleMessage('hello'), noopDownload)
+    const agent = live.get(created[0]?.sessionId ?? '') as FakeAgent | undefined
+    expect(agent).toBeDefined()
+    agent?.fire('session/event', agent.session, {
+      type: 'session/title',
+      data: {
+        title: '性能优化',
+        messageSeqs: [1],
+        source: { kind: 'provider', provider: 'session-title-first-prompt-llm' },
+      },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(renamed).toEqual(['u1：性能优化'])
+  })
+
+  it('ignores fallback and user-sourced title events', async () => {
+    const renamed: string[] = []
+    const { ctx, live, created } = makeHarness()
+    ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+      name === 'sessionTitle'
+        ? { rename: vi.fn((_session: unknown, title: string) => renamed.push(title)) }
+        : undefined,
+    )
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+    await manager.handle(singleMessage('hello'), noopDownload)
+    const agent = live.get(created[0]?.sessionId ?? '') as FakeAgent | undefined
+    agent?.fire('session/event', agent.session, {
+      type: 'session/title',
+      data: { title: 'hello', messageSeqs: [1], source: { kind: 'fallback' } },
+    })
+    agent?.fire('session/event', agent.session, {
+      type: 'session/title',
+      data: { title: '手动改名', messageSeqs: [], source: { kind: 'user' } },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(renamed).toEqual([])
+  })
+
+  it('a failing title rewrite never fails the turn', async () => {
+    const { ctx, live, created } = makeHarness()
+    ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+      name === 'sessionTitle'
         ? {
-            get: vi.fn(() => undefined),
-            rename: vi.fn((_session: unknown, title: string) => renamed.push(title)),
+            rename: vi.fn(() => {
+              throw new Error('session disposed')
+            }),
           }
         : undefined,
     )
     const manager = new AgentPool(ctx as never, testConfig())
     await manager.start()
-    await manager.handle(singleMessage('x'.repeat(120)), noopDownload)
-    expect(renamed).toEqual([`${'x'.repeat(59)}…`])
+    await manager.handle(singleMessage('hello'), noopDownload)
+    const agent = live.get(created[0]?.sessionId ?? '') as FakeAgent | undefined
+    agent?.fire('session/event', agent.session, {
+      type: 'session/title',
+      data: {
+        title: '性能优化',
+        messageSeqs: [1],
+        source: { kind: 'provider', provider: 'session-title-first-prompt-llm' },
+      },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await expect(manager.handle(singleMessage('again'), noopDownload)).resolves.toEqual({
+      text: 'Harness reply',
+    })
   })
 
   it('streams text deltas and captures reasoning + tool calls', async () => {

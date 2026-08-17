@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.14] - 2026-08-17
+
+### Changed
+
+- Session titles: the plugin no longer renames a conversation to its first
+  message text. WeCom sessions now keep the harness-generated short LLM title,
+  prefixed with the first sender's WeCom userid (`userid：标题`), so the
+  sidebar shows who each conversation belongs to. The prefix is applied only
+  to harness-generated (provider) titles: manual renames in the web UI are
+  left untouched, and the deterministic fallback is not pinned, so pending
+  LLM title generation is never superseded. Title rewrites are best-effort
+  and never fail the turn.
+
 ## [0.1.13] - 2026-08-17
 
 ### Changed

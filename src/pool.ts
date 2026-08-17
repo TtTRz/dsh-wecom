@@ -47,12 +47,8 @@ interface WorkspaceRegistryLike {
 
 /** Structural face of the optional `sessionTitle` service. */
 interface SessionTitleLike {
-  get(session: unknown): unknown
   rename(session: unknown, title: string): unknown
 }
-
-/** Upper bound for auto-generated conversation titles. */
-const TITLE_MAX_LENGTH = 60
 
 /** Structural face of the optional `compaction` service (`ctx.compaction`). */
 interface CompactionEngineLike {
@@ -101,6 +97,8 @@ export class AgentPool {
   private readonly epochs = new Map<string, number>()
   private readonly semaphore: Semaphore
   private persisted = new Set<string>()
+  /** First WeCom sender per conversation, used as the auto-title prefix. */
+  private readonly senders = new Map<string, string>()
   private workspacePromise: Promise<WorkspaceLike | undefined> | undefined
 
   constructor(
@@ -188,39 +186,47 @@ export class AgentPool {
     }
   }
 
-  /** First plain-text fragment of an inbound message, for session titling. */
-  private firstTextOf(message: BaseMessage): string {
-    if (message.msgtype === 'text') return message.text?.content ?? ''
-    if (message.msgtype === 'mixed') {
-      const mixed = message.mixed as
-        | { msg_item?: Array<{ msgtype?: string; text?: { content?: string } }> }
-        | undefined
-      for (const item of mixed?.msg_item ?? []) {
-        if (item.msgtype === 'text' && item.text?.content) return item.text.content
-      }
-    }
-    return ''
+  /**
+   * Remember the first WeCom sender of a conversation. The harness generates
+   * session titles automatically (an LLM short title); this userid becomes the
+   * sidebar prefix ("userid：标题"). Recorded before the message is delivered
+   * so the session-title watcher always has a prefix once a title event lands.
+   */
+  private rememberSender(id: string, message: BaseMessage): void {
+    if (!this.senders.has(id)) this.senders.set(id, message.from.userid)
   }
 
   /**
-   * Name a still-untitled conversation from its first message. The web
-   * sidebar hides titleless sessions (only the currently open one shows), so
-   * this runs on creation and again on resume for pre-title era sessions.
-   * Best-effort: a missing service or rename failure never fails the turn.
+   * Prefix harness-generated LLM titles with the WeCom sender userid. Reacting
+   * only to `provider` titles matters: renaming on the earlier deterministic
+   * fallback would supersede the harness's pending LLM generation and the
+   * short LLM title would never land. User-sourced titles (manual renames in
+   * the web UI, or our own rewrite) are ignored, so the prefix never fights
+   * the user. The rewrite is deferred off the append broadcast and is
+   * best-effort: a missing service or rename failure never fails the turn.
    */
-  private async titleSession(agent: Agent, message: BaseMessage): Promise<void> {
-    const sessionTitle = this.ctx.get('sessionTitle') as SessionTitleLike | undefined
-    if (sessionTitle === undefined) return
-    const session = agent.session
-    if (sessionTitle.get(session) !== undefined) return
-    const raw = this.firstTextOf(message).replace(/\s+/g, ' ').trim()
-    if (raw === '') return
-    const title = raw.length <= TITLE_MAX_LENGTH ? raw : `${raw.slice(0, TITLE_MAX_LENGTH - 1)}…`
-    try {
-      sessionTitle.rename(session, title)
-    } catch (error) {
-      this.log.error('WeCom session title failed: %s', String(error))
-    }
+  private watchSessionTitles(agent: Agent, id: string): void {
+    void agent.ctx.on('session/event', (_session, event: SessionEvent) => {
+      const type = event.type as string
+      if (type !== 'session/title') return
+      const { title, source } = event.data as {
+        title?: unknown
+        source?: { kind?: unknown }
+      }
+      if (source?.kind !== 'provider' || typeof title !== 'string') return
+      const sender = this.senders.get(id)
+      if (sender === undefined) return
+      const prefixed = `${sender}：${title}`
+      void Promise.resolve().then(() => {
+        try {
+          const sessionTitle = this.ctx.get('sessionTitle') as SessionTitleLike | undefined
+          if (sessionTitle === undefined) return
+          sessionTitle.rename(_session, prefixed)
+        } catch (error) {
+          this.log.error('WeCom session title prefix failed: %s', String(error))
+        }
+      })
+    })
   }
 
   /** Number of live conversation agents currently held. */
@@ -420,7 +426,7 @@ export class AgentPool {
   private async liveAgentForTurn(id: string, message: BaseMessage): Promise<Agent> {
     for (;;) {
       const agent = (await this.ensureAgent(id)).agent
-      await this.titleSession(agent, message)
+      this.rememberSender(id, message)
       if (this.ctx.agents.get(SessionId(id)) === agent) return agent
       this.agents.delete(id)
     }
@@ -518,6 +524,7 @@ export class AgentPool {
     const live = this.ctx.agents.get(sessionId)
     if (live !== undefined) {
       this.mountWecomInstructions(live)
+      this.watchSessionTitles(live, id)
       return { agent: live, dispose: async () => undefined }
     }
 
@@ -531,6 +538,7 @@ export class AgentPool {
         agentOptions,
         setup,
       })
+      this.watchSessionTitles(handle.agent, id)
       await this.groupSession(id)
       return handle
     }
@@ -541,6 +549,7 @@ export class AgentPool {
       agentOptions,
       setup,
     })
+    this.watchSessionTitles(handle.agent, id)
     this.persisted.add(id)
     await this.groupSession(id)
     return handle
