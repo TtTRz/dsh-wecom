@@ -1,4 +1,6 @@
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, AgentSetup } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
@@ -119,6 +121,7 @@ export class AgentPool {
     const headers = await this.ctx.sessionPersistence.list()
     this.persisted = new Set(headers.map((header) => String(header.id)))
     await mkdir(this.config.cwd, { recursive: true })
+    this.loadEpochs()
     for (let attempt = 0; attempt < 4; attempt += 1) {
       try {
         if ((await this.ensureWorkspace()) !== undefined) break
@@ -300,6 +303,7 @@ export class AgentPool {
     const base = conversationId(this.config.namespace, message)
     const nextEpoch = (this.epochs.get(base) ?? 0) + 1
     this.epochs.set(base, nextEpoch)
+    this.saveEpochs()
     const oldId = this.withEpoch(base, nextEpoch - 1)
     const handle = this.agents.get(oldId)
     if (handle === undefined) return
@@ -323,6 +327,42 @@ export class AgentPool {
     return epoch === 0 ? base : `${base}~g${epoch}`
   }
 
+  /** Where the durable per-conversation epoch map lives (one hidden file in the agent cwd). */
+  private epochStateFile(): string {
+    return join(this.config.cwd, '.dsh-wecom-state.json')
+  }
+
+  /**
+   * Restore the conversation epoch map from disk. `/new` (and the archived-id
+   * skip) bump this map; without persisting it a process restart forgets the
+   * reset, and the next message resumes the ORIGINAL session with its full
+   * history. Loading here makes the reset survive restarts.
+   */
+  private loadEpochs(): void {
+    try {
+      const file = this.epochStateFile()
+      if (!existsSync(file)) return
+      const parsed = JSON.parse(readFileSync(file, 'utf8')) as unknown
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return
+      for (const [base, epoch] of Object.entries(parsed)) {
+        if (typeof epoch === 'number' && Number.isInteger(epoch) && epoch >= 0) {
+          this.epochs.set(base, epoch)
+        }
+      }
+    } catch (error) {
+      this.log.warn('dsh-wecom epoch state load failed: %s', String(error))
+    }
+  }
+
+  /** Persist the epoch map so conversation resets survive a restart. */
+  private saveEpochs(): void {
+    try {
+      writeFileSync(this.epochStateFile(), JSON.stringify(Object.fromEntries(this.epochs)), 'utf8')
+    } catch (error) {
+      this.log.warn('dsh-wecom epoch state save failed: %s', String(error))
+    }
+  }
+
   /**
    * An archived session stays hidden in the web UI even when WeCom activity
    * resumes it, and the harness has no unarchive API — so skip archived ids by
@@ -336,7 +376,10 @@ export class AgentPool {
       epoch += 1
       candidate = this.withEpoch(base, epoch)
     }
-    if (candidate !== id) this.epochs.set(base, epoch)
+    if (candidate !== id) {
+      this.epochs.set(base, epoch)
+      this.saveEpochs()
+    }
     return candidate
   }
 

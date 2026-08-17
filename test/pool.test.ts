@@ -1,4 +1,6 @@
-import { describe, expect, it, vi } from 'vitest'
+import { rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { conversationId } from '../src/helpers.js'
 import { AgentPool } from '../src/pool.js'
 import { testConfig } from './test-config.js'
@@ -143,6 +145,12 @@ function singleMessage(text = 'hello'): never {
 const noopDownload = vi.fn(async () => ({ data: new Uint8Array() }))
 
 describe('AgentPool', () => {
+  beforeEach(() => {
+    // The epoch map persists to a file under the test cwd; wipe it so each
+    // test starts at epoch 0 (a stale file would leak `/new` state across tests).
+    rmSync(join('/tmp/wecom-test', '.dsh-wecom-state.json'), { force: true })
+  })
+
   it('creates an agent, mounts the preset, registers instructions, and returns text', async () => {
     const { ctx, mounts, sections, created, disposed } = makeHarness()
     const manager = new AgentPool(ctx as never, testConfig())
@@ -193,6 +201,24 @@ describe('AgentPool', () => {
     await manager.handle(singleMessage('two'), noopDownload)
     expect(created).toHaveLength(2)
     expect(created[1]?.sessionId).toContain('~g1')
+  })
+
+  it('persists the /new reset across a restart so the fresh session resumes', async () => {
+    const base = conversationId('default', singleMessage())
+    const first = new AgentPool(makeHarness().ctx as never, testConfig())
+    await first.start()
+    await first.handle(singleMessage('one'), noopDownload)
+    await first.forget(singleMessage('reset')) // epoch 0 -> 1, persisted to disk
+    await first.dispose()
+
+    // A new pool (fresh process) shares the same cwd and must load the epoch,
+    // so the next message opens `~g1` instead of resuming the ORIGINAL session.
+    const { ctx: ctx2, created: created2 } = makeHarness()
+    const second = new AgentPool(ctx2 as never, testConfig())
+    await second.start()
+    await second.handle(singleMessage('two'), noopDownload)
+
+    expect(created2[0]?.sessionId).toBe(`${base}~g1`)
   })
 
   it('cancels the turn on response timeout', async () => {
