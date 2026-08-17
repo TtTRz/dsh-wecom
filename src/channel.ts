@@ -67,7 +67,7 @@ export interface ChannelStatusService {
   snapshot(): ChannelStatus
 }
 
-const COMMANDS = new Set(['/ping', '/help', '/status', '/stop', '/compact', '/new'])
+const COMMANDS = new Set(['/ping', '/help', '/status', '/stop', '/compact', '/new', '/clear'])
 
 /**
  * Assemble one WeCom stream frame from reasoning and visible text. The WeCom
@@ -421,6 +421,7 @@ export class WecomChannel {
           '/stop — cancel the current generation',
           '/compact — summarize older history to save context',
           '/new — start a fresh conversation (history is kept)',
+          '/clear — alias of /new (clear context, start fresh)',
           'Anything else goes to the current Harness default model.',
         ].join('\n'),
         true,
@@ -451,7 +452,7 @@ export class WecomChannel {
       await this.sendStream(frame, streamId, text, true)
       return
     }
-    if (command === '/new') {
+    if (command === '/new' || command === '/clear') {
       await this.pool.forget(message)
       await this.sendStream(frame, streamId, 'Started a new conversation.', true)
     }

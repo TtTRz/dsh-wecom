@@ -329,6 +329,32 @@ describe('WecomChannel streaming', () => {
     const final = calls[2]
     expect(String(final?.[2])).toBe('<think>abc</think>\nHi')
   })
+
+  it('routes /clear as a /new alias', async () => {
+    const { client, fire } = makeClient()
+    const channel = new WecomChannel(
+      makeStreamingSetup([], 'unused') as never,
+      testConfig({ streamFlushMs: 5_000 }),
+      () => client,
+    )
+    await channel.start()
+    await fire('message', {
+      headers: { req_id: 'r1' },
+      body: {
+        msgid: 'm1',
+        aibotid: 'bot',
+        chattype: 'single',
+        from: { userid: 'u1' },
+        msgtype: 'text',
+        text: { content: '/clear' },
+      },
+    })
+
+    const calls = (client as unknown as { replyStream: ReturnType<typeof vi.fn> }).replyStream
+      .mock.calls
+    expect(calls.at(-1)?.[2]).toBe('Started a new conversation.')
+    expect(calls.at(-1)?.[3]).toBe(true)
+  })
 })
 
 describe('buildStreamContent', () => {

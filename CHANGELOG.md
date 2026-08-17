@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-08-17
+
+### Added
+
+- `/clear` command: an alias of `/new` that drops the current conversation and starts a fresh one, so users get the expected "clear context" spelling alongside `/new`.
+
 ## [0.1.8] - 2026-08-17
 
 ### Fixed
