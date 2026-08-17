@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.1.8] - 2026-08-17
+
+### Fixed
+
+- `/new` now survives a process restart: the per-conversation reset counter is persisted to `.dsh-wecom-state.json` in the agent cwd and reloaded on start. Previously the counter was in-memory only, so after a restart the next message resumed the ORIGINAL session with its full history instead of opening a fresh conversation.
+
 ## [0.1.7] - 2026-08-17
 
 ### Fixed
