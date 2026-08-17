@@ -178,7 +178,9 @@ export function apply(ctx: {
       : status === null
         ? 'var(--dsw-alias-label-secondary)'
         : 'var(--dsw-alias-state-warn-primary)'
-    const running = (status?.agents ?? []).filter((agent) => agent.wecom && agent.status === 'running').length
+    const running = (status?.agents ?? []).filter(
+      (agent) => agent.wecom && agent.status === 'running',
+    ).length
     const showCount = status !== null && status.available === true
     return React.createElement(
       'button',
