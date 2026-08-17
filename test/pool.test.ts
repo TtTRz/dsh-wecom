@@ -241,7 +241,7 @@ describe('AgentPool', () => {
       agents: {
         create: vi.fn(async () => ({ agent: hanging, dispose: vi.fn(async () => undefined) })),
         resume: vi.fn(),
-        get: vi.fn(),
+        get: vi.fn(() => hanging),
       },
       get: vi.fn(() => undefined),
     }
@@ -435,7 +435,7 @@ describe('AgentPool', () => {
       agents: {
         create: vi.fn(async () => ({ agent, dispose: vi.fn(async () => undefined) })),
         resume: vi.fn(),
-        get: vi.fn(),
+        get: vi.fn(() => agent),
       },
       get: vi.fn(() => undefined),
     }
@@ -490,7 +490,7 @@ describe('AgentPool', () => {
       agents: {
         create: vi.fn(async () => ({ agent, dispose: vi.fn(async () => undefined) })),
         resume: vi.fn(),
-        get: vi.fn(),
+        get: vi.fn(() => agent),
       },
       get: vi.fn(() => undefined),
     }

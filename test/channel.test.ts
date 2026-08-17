@@ -189,7 +189,7 @@ describe('WecomChannel streaming', () => {
           },
         ),
         resume: vi.fn(),
-        get: vi.fn(),
+        get: vi.fn(() => agent),
       },
       get: vi.fn(() => undefined),
     }
@@ -350,8 +350,8 @@ describe('WecomChannel streaming', () => {
       },
     })
 
-    const calls = (client as unknown as { replyStream: ReturnType<typeof vi.fn> }).replyStream
-      .mock.calls
+    const calls = (client as unknown as { replyStream: ReturnType<typeof vi.fn> }).replyStream.mock
+      .calls
     expect(calls.at(-1)?.[2]).toBe('Started a new conversation.')
     expect(calls.at(-1)?.[3]).toBe(true)
   })

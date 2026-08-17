@@ -402,61 +402,80 @@ export class AgentPool {
     download: MediaPort['download'],
     onDelta?: (delta: TurnDelta) => void,
   ): Promise<Reply> {
-    const handle = await this.ensureAgent(id)
-    const agent = handle.agent
-    // The web sidebar hides titleless sessions (only the current one shows),
-    // so name the conversation from its first message — on creation and again
-    // on resume when a pre-title era session is still blank.
-    await this.titleSession(agent, message)
     const release = await this.semaphore.acquire()
     try {
-      const start = agent.session.events.length
-      const reasoning: string[] = []
-      const pendingCalls = new Map<string, { name: string; arguments: string }>()
-      const toolCalls: ToolCallSummary[] = []
-      // Observe this agent's session firehose for the duration of the turn:
-      // forward text deltas for streaming and collect reasoning + tool activity
-      // for the optional final summary. Scoped to the agent, so we see only its
-      // events and the listener is torn down with `off()` after the turn.
-      const off = agent.ctx.on('session/event', (_session, event: SessionEvent) => {
-        if (event.type === 'assistant/chunk') {
-          const chunk = event.data.chunk
-          if (chunk.type === 'text-delta' && chunk.text) {
-            onDelta?.({ kind: 'text', text: chunk.text })
-          } else if (chunk.type === 'reasoning-delta' && chunk.text) {
-            reasoning.push(chunk.text)
-            onDelta?.({ kind: 'reasoning', text: chunk.text })
-          }
-        } else if (event.type === 'tool/call') {
-          pendingCalls.set(event.data.callId, {
-            name: event.data.name,
-            arguments: event.data.arguments,
-          })
-        } else if (event.type === 'tool/result') {
-          const call = pendingCalls.get(event.data.message.source.callId)
-          toolCalls.push({
-            name: call?.name ?? event.data.message.source.callId,
-            arguments: call?.arguments ?? '',
-            ok: event.data.error === undefined,
-            error: event.data.error?.code,
-          })
-        }
-      })
-      try {
-        const includeImages = containsImageMedia(message) ? await this.canViewImages(agent) : false
-        const content = await toContentBlocks(message, this.mediaPort(download), includeImages)
-        agent.followup(createUserMessage({ content, source: { kind: 'user' } }))
-        await this.settleTurn(agent)
-      } finally {
-        off()
-      }
-      const reply = this.extractText(agent.session.events.slice(start))
-      if (reasoning.length > 0) reply.reasoning = reasoning.join('')
-      if (toolCalls.length > 0) reply.toolCalls = toolCalls
-      return reply
+      const agent = await this.liveAgentForTurn(id, message)
+      return await this.driveTurn(agent, message, download, onDelta)
     } finally {
       release()
     }
+  }
+
+  /**
+   * Resolve a LIVE agent for the turn. The pool may have tracked an agent that
+   * its owner disposed while we waited on the semaphore (a `/new`/`/clear`, or
+   * the user closing the session in the web UI); driving that agent's now
+   * inactive scoped context (e.g. `agent.ctx.on`) throws, so re-open instead.
+   */
+  private async liveAgentForTurn(id: string, message: BaseMessage): Promise<Agent> {
+    for (;;) {
+      const agent = (await this.ensureAgent(id)).agent
+      await this.titleSession(agent, message)
+      if (this.ctx.agents.get(SessionId(id)) === agent) return agent
+      this.agents.delete(id)
+    }
+  }
+
+  private async driveTurn(
+    agent: Agent,
+    message: BaseMessage,
+    download: MediaPort['download'],
+    onDelta?: (delta: TurnDelta) => void,
+  ): Promise<Reply> {
+    const start = agent.session.events.length
+    const reasoning: string[] = []
+    const pendingCalls = new Map<string, { name: string; arguments: string }>()
+    const toolCalls: ToolCallSummary[] = []
+    // Observe this agent's session firehose for the duration of the turn:
+    // forward text deltas for streaming and collect reasoning + tool activity
+    // for the optional final summary. Scoped to the agent, so we see only its
+    // events and the listener is torn down with `off()` after the turn.
+    const off = agent.ctx.on('session/event', (_session, event: SessionEvent) => {
+      if (event.type === 'assistant/chunk') {
+        const chunk = event.data.chunk
+        if (chunk.type === 'text-delta' && chunk.text) {
+          onDelta?.({ kind: 'text', text: chunk.text })
+        } else if (chunk.type === 'reasoning-delta' && chunk.text) {
+          reasoning.push(chunk.text)
+          onDelta?.({ kind: 'reasoning', text: chunk.text })
+        }
+      } else if (event.type === 'tool/call') {
+        pendingCalls.set(event.data.callId, {
+          name: event.data.name,
+          arguments: event.data.arguments,
+        })
+      } else if (event.type === 'tool/result') {
+        const call = pendingCalls.get(event.data.message.source.callId)
+        toolCalls.push({
+          name: call?.name ?? event.data.message.source.callId,
+          arguments: call?.arguments ?? '',
+          ok: event.data.error === undefined,
+          error: event.data.error?.code,
+        })
+      }
+    })
+    try {
+      const includeImages = containsImageMedia(message) ? await this.canViewImages(agent) : false
+      const content = await toContentBlocks(message, this.mediaPort(download), includeImages)
+      agent.followup(createUserMessage({ content, source: { kind: 'user' } }))
+      await this.settleTurn(agent)
+    } finally {
+      off()
+    }
+    const reply = this.extractText(agent.session.events.slice(start))
+    if (reasoning.length > 0) reply.reasoning = reasoning.join('')
+    if (toolCalls.length > 0) reply.toolCalls = toolCalls
+    return reply
   }
 
   private async settleTurn(agent: Agent): Promise<void> {

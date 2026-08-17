@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-08-17
+
+### Fixed
+
+- A turn no longer fails with `cannot create effect on inactive context` when the conversation's agent is disposed between being resolved and the turn subscribing to it (e.g. a `/new`/`/clear`, or the user closing the session in the web UI, while the message was still queued). The pool now re-resolves a live agent right before driving the turn.
+
 ## [0.1.9] - 2026-08-17
 
 ### Added
