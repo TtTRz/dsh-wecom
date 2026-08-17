@@ -34,6 +34,18 @@ dsh web
 
 持久化：`WECOM_BOT_ID` 写入 `~/.dsh/.env`，`WECOM_BOT_SECRET` 写入 `~/.dsh/.credentials.yaml`（引用 `WECOM_BOT_SECRET`）；`DSH_WECOM_CWD` 覆盖 agent 工作目录。
 
+## 📦 从 npm 安装
+
+发布包自带预构建的 `dist/`，安装时不会执行构建脚本：
+
+```sh
+dsh plugin --profile web add dsh-wecom          # 最新版
+dsh plugin --profile web add dsh-wecom@0.1.17   # 锁定版本
+```
+
+升级同理：`dsh plugin --profile web add dsh-wecom@<新版本>`。装好后配置
+`WECOM_BOT_ID` / `WECOM_BOT_SECRET`（见快速开始）并重启 `dsh web`。
+
 ## 📦 从源码安装
 
 Git 安装（请锁定 commit——构建脚本会在你机器上执行）：

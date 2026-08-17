@@ -29,12 +29,13 @@ export async function toContentBlocks(
   const images: ImageContent[] = []
   await readBody(message, parts, images, media)
   readQuote(message, parts, images)
+  const hadText = parts.length > 0
 
   // Label the message with its sender: "[userid]：text" on one line. The
   // full-width colon is deliberate — an ASCII colon after a bracket would
   // parse as a Markdown link reference and vanish from rendered bubbles.
   const sender = message.from.userid
-  if (parts.length > 0) {
+  if (hadText) {
     parts[0] = `[${sender}]：${parts[0]}`
   } else {
     parts.push(`[${sender}]`)
@@ -72,7 +73,7 @@ export async function toContentBlocks(
     }
   }
 
-  if (parts.length === 1 && blocks.length === 0) {
+  if (!hadText && blocks.length === 0 && parts.length === 1) {
     parts.push(`[Unsupported WeCom message type: ${message.msgtype}]`)
   }
   return [{ type: 'text', text: parts.join('\n') }, ...blocks]

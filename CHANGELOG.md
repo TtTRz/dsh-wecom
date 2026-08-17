@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.16] - 2026-08-17
+## [0.1.17] - 2026-08-17
 
 ### Changed
 
@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the long `[WeCom group message from WeCom user …]` bracket. The full-width
   colon is deliberate: an ASCII colon after a bracket would parse as a
   Markdown link reference and disappear from rendered chat bubbles.
+
+### Fixed
+
+- Text messages no longer carry a spurious `[Unsupported WeCom message type]`
+  note — the sender-label rewrite broke the emptiness check that guarded it.
+
+### Docs
+
+- READMEs now document installing from npm (`dsh plugin --profile web add
+  dsh-wecom`), including version pinning and upgrades.
 
 ## [0.1.15] - 2026-08-17
 

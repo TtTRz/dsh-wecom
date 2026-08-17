@@ -35,6 +35,19 @@ Once the log prints `WeCom AI Bot authenticated`, send `/ping` and expect `pong`
 
 To persist across restarts: write `WECOM_BOT_ID` into `~/.dsh/.env` and `WECOM_BOT_SECRET` into `~/.dsh/.credentials.yaml` (reference `WECOM_BOT_SECRET`). `DSH_WECOM_CWD` overrides the agent working directory.
 
+## 📦 Install from npm
+
+The published package ships prebuilt `dist/` — no build scripts run on install:
+
+```sh
+dsh plugin --profile web add dsh-wecom          # latest
+dsh plugin --profile web add dsh-wecom@0.1.17   # pin a version
+```
+
+Upgrade a pinned install the same way (`dsh-wecom@<newer version>`). After
+installing, set `WECOM_BOT_ID` / `WECOM_BOT_SECRET` (see Quick Start) and
+restart `dsh web`.
+
 ## 📦 Install from source
 
 Git install (pin the commit — build scripts run on your machine):
