@@ -26,7 +26,7 @@ export async function toContentBlocks(
   includeImages: boolean,
 ): Promise<ContentBlock[]> {
   const scope = message.chattype === 'group' ? 'WeCom group' : 'WeCom private chat'
-  const parts = [`[${scope} message from WeCom user ${maskId(message.from.userid)}]`]
+  const parts = [`[${scope} message from WeCom user ${message.from.userid}]`]
   const images: ImageContent[] = []
   await readBody(message, parts, images, media)
   readQuote(message, parts, images)
@@ -144,10 +144,6 @@ function readMixed(
 function appendText(parts: string[], value: string | undefined, prefix = ''): void {
   const normalized = value?.trim()
   if (normalized) parts.push(prefix + normalized)
-}
-
-function maskId(value: string): string {
-  return value.length <= 8 ? value : value.slice(0, 8)
 }
 
 function brief(error: unknown): string {

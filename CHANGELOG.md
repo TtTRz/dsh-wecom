@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.15] - 2026-08-17
+
+### Changed
+
+- Group conversations now use the group `chatid` (falling back to the sender
+  userid) as the session-title prefix, while single chats keep the sender
+  userid — so the sidebar prefix always matches the conversation identity.
+- Message content no longer masks the sender userid: each message carries the
+  full WeCom userid in its leading metadata line, so chat bubbles distinguish
+  senders (the masked 8-character prefix is gone).
+
 ## [0.1.14] - 2026-08-17
 
 ### Changed

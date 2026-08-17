@@ -28,19 +28,34 @@ function makeMedia() {
 }
 
 describe('toContentBlocks', () => {
-  it('wraps a text message with scope and sender metadata', async () => {
+  it('wraps a text message with scope and the full sender userid', async () => {
     const { media } = makeMedia()
     const blocks = await toContentBlocks(textMessage('hello'), media, true)
     expect(blocks).toHaveLength(1)
     const text = (blocks[0] as { type: 'text'; text: string }).text
     expect(text).toContain('WeCom private chat')
+    expect(text).toContain('message from WeCom user u1')
     expect(text).toContain('hello')
+  })
+
+  it('does not truncate long userids', async () => {
+    const { media } = makeMedia()
+    const message = {
+      ...(textMessage('hello') as object),
+      from: { userid: 'zhangsan.very.long.id' },
+    }
+    const blocks = await toContentBlocks(message as never, media, true)
+    expect((blocks[0] as { text: string }).text).toContain(
+      'message from WeCom user zhangsan.very.long.id',
+    )
   })
 
   it('labels group messages', async () => {
     const { media } = makeMedia()
     const blocks = await toContentBlocks(textMessage('hi', 'group'), media, true)
-    expect((blocks[0] as { text: string }).text).toContain('WeCom group')
+    const text = (blocks[0] as { text: string }).text
+    expect(text).toContain('WeCom group')
+    expect(text).toContain('message from WeCom user u1')
   })
 
   it('passes voice transcription through', async () => {

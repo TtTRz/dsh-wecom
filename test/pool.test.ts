@@ -144,6 +144,18 @@ function singleMessage(text = 'hello'): never {
   } as never
 }
 
+function groupMessage(text = 'hello'): never {
+  return {
+    msgid: 'm2',
+    aibotid: 'bot',
+    chattype: 'group',
+    chatid: 'wrTestGroupChat',
+    from: { userid: 'u2' },
+    msgtype: 'text',
+    text: { content: text },
+  } as never
+}
+
 const noopDownload = vi.fn(async () => ({ data: new Uint8Array() }))
 
 describe('AgentPool', () => {
@@ -364,7 +376,7 @@ describe('AgentPool', () => {
     expect(renamed).toEqual([])
   })
 
-  it('prefixes a harness-generated LLM title with the WeCom sender userid', async () => {
+  it('prefixes a harness-generated LLM title with the userid for single chats', async () => {
     const renamed: string[] = []
     const { ctx, live, created } = makeHarness()
     ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
@@ -387,6 +399,31 @@ describe('AgentPool', () => {
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(renamed).toEqual(['u1：性能优化'])
+  })
+
+  it('uses the group chatid as the title prefix for group chats', async () => {
+    const renamed: string[] = []
+    const { ctx, live, created } = makeHarness()
+    ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+      name === 'sessionTitle'
+        ? { rename: vi.fn((_session: unknown, title: string) => renamed.push(title)) }
+        : undefined,
+    )
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+    await manager.handle(groupMessage('hello'), noopDownload)
+    const agent = live.get(created[0]?.sessionId ?? '') as FakeAgent | undefined
+    expect(agent).toBeDefined()
+    agent?.fire('session/event', agent.session, {
+      type: 'session/title',
+      data: {
+        title: '性能优化',
+        messageSeqs: [1],
+        source: { kind: 'provider', provider: 'session-title-first-prompt-llm' },
+      },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(renamed).toEqual(['wrTestGroupChat：性能优化'])
   })
 
   it('ignores fallback and user-sourced title events', async () => {

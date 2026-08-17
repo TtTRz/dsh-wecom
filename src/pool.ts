@@ -97,8 +97,8 @@ export class AgentPool {
   private readonly epochs = new Map<string, number>()
   private readonly semaphore: Semaphore
   private persisted = new Set<string>()
-  /** First WeCom sender per conversation, used as the auto-title prefix. */
-  private readonly senders = new Map<string, string>()
+  /** Title prefix per conversation: the userid for single chats, the chatid for groups. */
+  private readonly titlePrefixes = new Map<string, string>()
   private workspacePromise: Promise<WorkspaceLike | undefined> | undefined
 
   constructor(
@@ -187,23 +187,28 @@ export class AgentPool {
   }
 
   /**
-   * Remember the first WeCom sender of a conversation. The harness generates
-   * session titles automatically (an LLM short title); this userid becomes the
-   * sidebar prefix ("userid：标题"). Recorded before the message is delivered
-   * so the session-title watcher always has a prefix once a title event lands.
+   * Remember the title prefix of a conversation. The harness generates
+   * session titles automatically (an LLM short title); the prefix becomes the
+   * sidebar prefix ("前缀：标题") — the sender userid for single chats, the
+   * group chatid for group chats. Recorded before the message is delivered so
+   * the session-title watcher always has a prefix once a title event lands.
    */
-  private rememberSender(id: string, message: BaseMessage): void {
-    if (!this.senders.has(id)) this.senders.set(id, message.from.userid)
+  private rememberTitlePrefix(id: string, message: BaseMessage): void {
+    if (this.titlePrefixes.has(id)) return
+    const prefix =
+      message.chattype === 'group' ? (message.chatid ?? message.from.userid) : message.from.userid
+    this.titlePrefixes.set(id, prefix)
   }
 
   /**
-   * Prefix harness-generated LLM titles with the WeCom sender userid. Reacting
-   * only to `provider` titles matters: renaming on the earlier deterministic
-   * fallback would supersede the harness's pending LLM generation and the
-   * short LLM title would never land. User-sourced titles (manual renames in
-   * the web UI, or our own rewrite) are ignored, so the prefix never fights
-   * the user. The rewrite is deferred off the append broadcast and is
-   * best-effort: a missing service or rename failure never fails the turn.
+   * Prefix harness-generated LLM titles with the conversation's title prefix.
+   * Reacting only to `provider` titles matters: renaming on the earlier
+   * deterministic fallback would supersede the harness's pending LLM
+   * generation and the short LLM title would never land. User-sourced titles
+   * (manual renames in the web UI, or our own rewrite) are ignored, so the
+   * prefix never fights the user. The rewrite is deferred off the append
+   * broadcast and is best-effort: a missing service or rename failure never
+   * fails the turn.
    */
   private watchSessionTitles(agent: Agent, id: string): void {
     void agent.ctx.on('session/event', (_session, event: SessionEvent) => {
@@ -214,9 +219,9 @@ export class AgentPool {
         source?: { kind?: unknown }
       }
       if (source?.kind !== 'provider' || typeof title !== 'string') return
-      const sender = this.senders.get(id)
-      if (sender === undefined) return
-      const prefixed = `${sender}：${title}`
+      const prefix = this.titlePrefixes.get(id)
+      if (prefix === undefined) return
+      const prefixed = `${prefix}：${title}`
       void Promise.resolve().then(() => {
         try {
           const sessionTitle = this.ctx.get('sessionTitle') as SessionTitleLike | undefined
@@ -426,7 +431,7 @@ export class AgentPool {
   private async liveAgentForTurn(id: string, message: BaseMessage): Promise<Agent> {
     for (;;) {
       const agent = (await this.ensureAgent(id)).agent
-      this.rememberSender(id, message)
+      this.rememberTitlePrefix(id, message)
       if (this.ctx.agents.get(SessionId(id)) === agent) return agent
       this.agents.delete(id)
     }
