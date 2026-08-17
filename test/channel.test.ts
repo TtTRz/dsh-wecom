@@ -80,6 +80,18 @@ describe('WecomChannel status', () => {
     )
   })
 
+  it('clears the sticky error after a successful re-authentication', async () => {
+    const { channel, fire } = await makeRunningChannel()
+    fire('error', new Error('write EPROTO boom'))
+    expect(channel.snapshot().lastError).toBe('write EPROTO boom')
+
+    fire('authenticated')
+    const snapshot = channel.snapshot()
+    expect(snapshot.lastError).toBeNull()
+    expect(snapshot.connected).toBe(true)
+    expect(snapshot.authenticatedAt).toBeTypeOf('number')
+  })
+
   it('marks stopping after stop', async () => {
     const { channel } = await makeRunningChannel()
     await channel.stop()

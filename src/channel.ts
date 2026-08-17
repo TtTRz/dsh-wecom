@@ -223,6 +223,13 @@ export class WecomChannel {
     client.on('connected', () => this.log.info('WeCom WebSocket connected; authenticating'))
     client.on('authenticated', () => {
       this.authenticatedAt = Date.now()
+      // A successful (re)connect clears the sticky error: the panel must not
+      // keep showing a failure the channel already recovered from. The
+      // recovered message is logged first so the incident stays traceable.
+      if (this.lastError !== null) {
+        this.log.info('WeCom recovered after: %s', this.lastError)
+        this.lastError = null
+      }
       resolveReady()
     })
     client.on('disconnected', (reason) => {
