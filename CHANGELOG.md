@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-08-17
+
+### Changed
+
+- Sidebar-foot WeCom button: the session summary (`6 WeCom · 29 total`) now
+  sits right-aligned on the far side of the row instead of a pill hugging the
+  "WeCom" label.
+
 ## [0.1.11] - 2026-08-17
 
 ### Changed
