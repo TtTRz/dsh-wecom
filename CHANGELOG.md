@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.22] - 2026-08-17
+
+### Changed
+
+- The `[userid]：` sender label is now prepended to message content only in
+  group chats. Single chats have exactly one sender, so the label is dropped
+  and the bubble shows the message text alone.
+
 ## [0.1.21] - 2026-08-17
 
 ### Changed

@@ -31,14 +31,19 @@ export async function toContentBlocks(
   readQuote(message, parts, images)
   const hadText = parts.length > 0
 
-  // Label the message with its sender: "[userid]：text" on one line. The
-  // full-width colon is deliberate — an ASCII colon after a bracket would
-  // parse as a Markdown link reference and vanish from rendered bubbles.
-  const sender = message.from.userid
-  if (hadText) {
-    parts[0] = `[${sender}]：${parts[0]}`
-  } else {
-    parts.push(`[${sender}]`)
+  // Label the message with its sender — group chats only: "[userid]：text"
+  // on one line. Single chats have exactly one sender, so the label is
+  // noise there. The full-width colon is deliberate: an ASCII colon after a
+  // bracket would parse as a Markdown link reference and vanish from
+  // rendered bubbles.
+  const group = message.chattype === 'group'
+  if (group) {
+    const sender = message.from.userid
+    if (hadText) {
+      parts[0] = `[${sender}]：${parts[0]}`
+    } else {
+      parts.push(`[${sender}]`)
+    }
   }
 
   const blocks: ContentBlock[] = []
@@ -73,7 +78,8 @@ export async function toContentBlocks(
     }
   }
 
-  if (!hadText && blocks.length === 0 && parts.length === 1) {
+  // Nothing parseable besides the (group-only) sender label: note the type.
+  if (!hadText && blocks.length === 0 && parts.length === (group ? 1 : 0)) {
     parts.push(`[Unsupported WeCom message type: ${message.msgtype}]`)
   }
   return [{ type: 'text', text: parts.join('\n') }, ...blocks]

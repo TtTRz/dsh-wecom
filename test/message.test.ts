@@ -28,25 +28,25 @@ function makeMedia() {
 }
 
 describe('toContentBlocks', () => {
-  it('labels a text message with a compact [userid]： prefix', async () => {
+  it('leaves single-chat text messages unlabeled', async () => {
     const { media } = makeMedia()
     const blocks = await toContentBlocks(textMessage('hello'), media, true)
     expect(blocks).toHaveLength(1)
     const text = (blocks[0] as { type: 'text'; text: string }).text
-    expect(text).toBe('[u1]：hello')
+    expect(text).toBe('hello')
   })
 
-  it('does not truncate long userids', async () => {
+  it('labels group messages with the full sender userid, untruncated', async () => {
     const { media } = makeMedia()
     const message = {
-      ...(textMessage('hello') as object),
+      ...(textMessage('hello', 'group') as object),
       from: { userid: 'zhangsan.very.long.id' },
     }
     const blocks = await toContentBlocks(message as never, media, true)
     expect((blocks[0] as { text: string }).text).toBe('[zhangsan.very.long.id]：hello')
   })
 
-  it('uses the same compact prefix for group messages', async () => {
+  it('uses the compact [userid]： prefix for group messages', async () => {
     const { media } = makeMedia()
     const blocks = await toContentBlocks(textMessage('hi', 'group'), media, true)
     expect((blocks[0] as { text: string }).text).toBe('[u1]：hi')
