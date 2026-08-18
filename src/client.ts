@@ -179,9 +179,12 @@ export function apply(ctx: {
         ? 'var(--dsw-alias-label-secondary)'
         : 'var(--dsw-alias-state-warn-primary)'
     const counts = status?.sessions
+    const running = (status?.agents ?? []).filter(
+      (agent) => agent.wecom && agent.status === 'running',
+    ).length
     const sessionsText =
       status !== null && status.available === true && counts !== undefined
-        ? `${counts.wecom} WeCom · ${counts.total} total`
+        ? `Active: ${running} Total: ${counts.wecom}`
         : null
     return React.createElement(
       'button',
@@ -348,7 +351,7 @@ export function apply(ctx: {
             'div',
             { className: 'wecom-panel-row' },
             React.createElement('span', { className: 'wecom-panel-label' }, 'Sessions'),
-            React.createElement('span', null, `${counts.wecom} WeCom · ${counts.total} total`),
+            React.createElement('span', null, String(counts.wecom)),
           )
         : null,
       proc

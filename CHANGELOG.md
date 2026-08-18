@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.23] - 2026-08-17
+
+### Changed
+
+- The sidebar status button now reads `Active: N Total: M` — running WeCom
+  conversations and total WeCom sessions. Non-WeCom sessions no longer
+  appear anywhere in the status UI: the floating panel's Sessions row shows
+  only the WeCom count, and the live-agent list stays WeCom-only.
+
 ## [0.1.22] - 2026-08-17
 
 ### Changed
