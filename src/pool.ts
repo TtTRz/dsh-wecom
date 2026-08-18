@@ -99,6 +99,8 @@ export class AgentPool {
   private persisted = new Set<string>()
   /** Title prefix per conversation: the userid for single chats, the chatid for groups. */
   private readonly titlePrefixes = new Map<string, string>()
+  /** Persisted peer per conversation BASE id (survives restarts), see {@link loadState}. */
+  private readonly peers = new Map<string, string>()
   /** Canonical title per conversation, enforced against manual renames. */
   private readonly canonicalTitles = new Map<string, string>()
   private workspacePromise: Promise<WorkspaceLike | undefined> | undefined
@@ -129,7 +131,7 @@ export class AgentPool {
     const headers = await this.ctx.sessionPersistence.list()
     this.persisted = new Set(headers.map((header) => String(header.id)))
     await mkdir(this.config.cwd, { recursive: true })
-    this.loadEpochs()
+    this.loadState()
     for (let attempt = 0; attempt < 4; attempt += 1) {
       try {
         if ((await this.ensureWorkspace()) !== undefined) break
@@ -201,13 +203,20 @@ export class AgentPool {
    * session titles automatically (an LLM short title); the prefix becomes the
    * sidebar prefix ("前缀：标题") — the sender userid for single chats, the
    * group chatid for group chats. Recorded before the message is delivered so
-   * the session-title watcher always has a prefix once a title event lands.
+   * the session-title watcher always has a prefix once a title event lands,
+   * and persisted under the conversation's base id so the status panel can
+   * show the peer right after a restart.
    */
   private rememberTitlePrefix(id: string, message: BaseMessage): void {
     if (this.titlePrefixes.has(id)) return
     const prefix =
       message.chattype === 'group' ? (message.chatid ?? message.from.userid) : message.from.userid
     this.titlePrefixes.set(id, prefix)
+    const base = this.baseId(id)
+    if (this.peers.get(base) !== prefix) {
+      this.peers.set(base, prefix)
+      this.saveState()
+    }
   }
 
   /**
@@ -232,7 +241,7 @@ export class AgentPool {
     if (typeof title !== 'string') return
     const kind = source?.kind
     if (kind === 'provider') {
-      const prefix = this.titlePrefixes.get(id)
+      const prefix = this.peerOf(id)
       const canonical = prefix === undefined ? title : `${prefix}：${title}`
       this.canonicalTitles.set(id, canonical)
       if (prefix !== undefined) this.renameSession(session, canonical)
@@ -286,12 +295,13 @@ export class AgentPool {
 
   /**
    * Identifying peer of one conversation for display: the sender userid for
-   * single chats, the group chatid for group chats. Known once the first
-   * message of this process touched the conversation (the map is in-memory),
-   * so it is undefined for idle conversations until their next message.
+   * single chats, the group chatid for group chats. Resolved from the
+   * in-memory map first, then from the persisted base-id map loaded from
+   * `.dsh-wecom-state.json` — so the panel shows the peer right after a
+   * restart, before the conversation's next message.
    */
   peerOf(sessionId: string): string | undefined {
-    return this.titlePrefixes.get(sessionId)
+    return this.titlePrefixes.get(sessionId) ?? this.peers.get(this.baseId(sessionId))
   }
 
   /**
@@ -369,7 +379,7 @@ export class AgentPool {
     const base = conversationId(this.config.namespace, message)
     const nextEpoch = (this.epochs.get(base) ?? 0) + 1
     this.epochs.set(base, nextEpoch)
-    this.saveEpochs()
+    this.saveState()
     const oldId = this.withEpoch(base, nextEpoch - 1)
     const handle = this.agents.get(oldId)
     if (handle === undefined) return
@@ -393,39 +403,57 @@ export class AgentPool {
     return epoch === 0 ? base : `${base}~g${epoch}`
   }
 
-  /** Where the durable per-conversation epoch map lives (one hidden file in the agent cwd). */
+  /** The epoch-free base conversation id of any (possibly epoch-suffixed) id. */
+  private baseId(id: string): string {
+    return id.replace(/~g\d+$/, '')
+  }
+
+  /** Where the durable per-conversation state lives (one hidden file in the agent cwd). */
   private epochStateFile(): string {
     return join(this.config.cwd, '.dsh-wecom-state.json')
   }
 
   /**
-   * Restore the conversation epoch map from disk. `/new` (and the archived-id
-   * skip) bump this map; without persisting it a process restart forgets the
-   * reset, and the next message resumes the ORIGINAL session with its full
-   * history. Loading here makes the reset survive restarts.
+   * Restore the durable per-conversation state from disk: the reset epoch map
+   * (so `/new` survives restarts) and the display peer per base conversation
+   * id (so the status panel shows chatid/userid before the next message).
+   * Accepts both the current `{ epochs, peers }` shape and the legacy flat
+   * epoch map written by earlier versions.
    */
-  private loadEpochs(): void {
+  private loadState(): void {
     try {
       const file = this.epochStateFile()
       if (!existsSync(file)) return
       const parsed = JSON.parse(readFileSync(file, 'utf8')) as unknown
       if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return
-      for (const [base, epoch] of Object.entries(parsed)) {
+      const record = parsed as Record<string, unknown>
+      const legacy = record.epochs === undefined
+      const epochEntries = legacy ? Object.entries(record) : Object.entries(record.epochs ?? {})
+      for (const [base, epoch] of epochEntries) {
         if (typeof epoch === 'number' && Number.isInteger(epoch) && epoch >= 0) {
           this.epochs.set(base, epoch)
         }
       }
+      if (!legacy) {
+        for (const [base, peer] of Object.entries(record.peers ?? {})) {
+          if (typeof peer === 'string' && peer.length > 0) this.peers.set(base, peer)
+        }
+      }
     } catch (error) {
-      this.log.warn('dsh-wecom epoch state load failed: %s', String(error))
+      this.log.warn('dsh-wecom state load failed: %s', String(error))
     }
   }
 
-  /** Persist the epoch map so conversation resets survive a restart. */
-  private saveEpochs(): void {
+  /** Persist epochs and peers so conversation state survives a restart. */
+  private saveState(): void {
     try {
-      writeFileSync(this.epochStateFile(), JSON.stringify(Object.fromEntries(this.epochs)), 'utf8')
+      const state = {
+        epochs: Object.fromEntries(this.epochs),
+        peers: Object.fromEntries(this.peers),
+      }
+      writeFileSync(this.epochStateFile(), JSON.stringify(state), 'utf8')
     } catch (error) {
-      this.log.warn('dsh-wecom epoch state save failed: %s', String(error))
+      this.log.warn('dsh-wecom state save failed: %s', String(error))
     }
   }
 
@@ -444,7 +472,7 @@ export class AgentPool {
     }
     if (candidate !== id) {
       this.epochs.set(base, epoch)
-      this.saveEpochs()
+      this.saveState()
     }
     return candidate
   }

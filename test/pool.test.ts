@@ -1,4 +1,4 @@
-import { rmSync } from 'node:fs'
+import { readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { conversationId } from '../src/helpers.js'
@@ -248,6 +248,40 @@ describe('AgentPool', () => {
     await second.handle(singleMessage('two'), noopDownload)
 
     expect(created2[0]?.sessionId).toBe(`${base}~g1`)
+  })
+
+  it('persists the display peer across a restart', async () => {
+    const base = conversationId('default', singleMessage())
+    const first = new AgentPool(makeHarness().ctx as never, testConfig())
+    await first.start()
+    await first.handle(singleMessage('one'), noopDownload)
+    expect(first.peerOf(base)).toBe('u1')
+    expect(first.peerOf(`${base}~g7`)).toBe('u1') // epoch-suffixed ids share the peer
+    await first.dispose()
+
+    // A fresh pool (new process) resolves the peer from the state file
+    // without needing the conversation's next message.
+    const second = new AgentPool(makeHarness().ctx as never, testConfig())
+    await second.start()
+    expect(second.peerOf(base)).toBe('u1')
+    await second.dispose()
+  })
+
+  it('migrates the legacy flat epoch state file and writes back the new shape', async () => {
+    const base = conversationId('default', singleMessage())
+    const file = join('/tmp/wecom-test', '.dsh-wecom-state.json')
+    writeFileSync(file, JSON.stringify({ [base]: 1 }), 'utf8') // pre-0.1.21 format
+    const { ctx, created } = makeHarness()
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+    await manager.handle(singleMessage('one'), noopDownload)
+    expect(created[0]?.sessionId).toBe(`${base}~g1`)
+    const saved = JSON.parse(readFileSync(file, 'utf8')) as {
+      epochs?: unknown
+      peers?: unknown
+    }
+    expect(saved.epochs).toEqual({ [base]: 1 })
+    expect(saved.peers).toEqual({ [base]: 'u1' })
   })
 
   it('cancels the turn on response timeout', async () => {

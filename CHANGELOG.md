@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.21] - 2026-08-17
+
+### Changed
+
+- The per-conversation display peer (userid / chatid) is now persisted in
+  `.dsh-wecom-state.json` next to the reset epochs, so the status panel shows
+  the right peer immediately after a restart instead of falling back to
+  `WeCom · single/group` until the next message. Legacy flat epoch state
+  files migrate transparently on load.
+
 ## [0.1.20] - 2026-08-17
 
 ### Changed
