@@ -43,17 +43,24 @@ export interface StatusPayload {
 
 /** Minimal live-agent face; leaf fields are read immediately, nothing retained. */
 interface AgentLike {
-  session: { id: string }
+  session: {
+    id: string
+    requestHeader?: () => { config?: { model?: unknown } } | undefined
+  }
   status: string
   options?: { model?: string }
 }
 
 function agentView(agent: AgentLike): AgentView {
   const sessionId = String(agent.session.id)
+  // The model a conversation actually runs on is folded from its logged
+  // request headers — `agent.options` is only the creation-time snapshot and
+  // goes stale once the session's model is switched in the web UI.
+  const headerModel = agent.session.requestHeader?.()?.config?.model
   return {
     sessionId,
     status: agent.status,
-    model: agent.options?.model ?? '',
+    model: typeof headerModel === 'string' ? headerModel : (agent.options?.model ?? ''),
     wecom: sessionId.startsWith('dsh-wecom-'),
   }
 }

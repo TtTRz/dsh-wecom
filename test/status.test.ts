@@ -17,7 +17,11 @@ const snapshot: ChannelStatus = {
 
 const agents = [
   {
-    session: { id: 'dsh-wecom-single-abc123' },
+    session: {
+      id: 'dsh-wecom-single-abc123',
+      // The logged header wins over the creation-time options snapshot.
+      requestHeader: () => ({ config: { provider: 'p', model: 'deepseek-v4-pro' } }),
+    },
     status: 'idle',
     options: { model: 'deepseek-v4-flash' },
   },
@@ -50,10 +54,20 @@ describe('statusPayload', () => {
       {
         sessionId: 'dsh-wecom-single-abc123',
         status: 'idle',
-        model: 'deepseek-v4-flash',
+        // The logged request header overrides the stale creation-time options.
+        model: 'deepseek-v4-pro',
         wecom: true,
       },
     ])
+  })
+
+  it('falls back to the creation-time options when no request header is logged', () => {
+    const payload = statusPayload(
+      snapshot,
+      [{ session: { id: 'session-a' }, status: 'idle', options: { model: 'glm-5.3' } }],
+      [],
+    )
+    expect(payload.agents[0]?.model).toBe('glm-5.3')
   })
 
   it('counts total and WeCom sessions', () => {

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.19] - 2026-08-17
+
+### Fixed
+
+- The status panel (`/api/wecom/status` and the sidebar popover) showed the
+  same stale model for every live agent: it read the creation-time
+  `agent.options` snapshot. It now reads each session's folded request header
+  — the model the conversation actually runs on — and falls back to the
+  creation options before the first request is logged. Per-session model
+  switches in the web UI now show up correctly.
+
 ## [0.1.18] - 2026-08-17
 
 ### Changed
