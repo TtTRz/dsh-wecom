@@ -285,6 +285,16 @@ export class AgentPool {
   }
 
   /**
+   * Identifying peer of one conversation for display: the sender userid for
+   * single chats, the group chatid for group chats. Known once the first
+   * message of this process touched the conversation (the map is in-memory),
+   * so it is undefined for idle conversations until their next message.
+   */
+  peerOf(sessionId: string): string | undefined {
+    return this.titlePrefixes.get(sessionId)
+  }
+
+  /**
    * Feed one message to its conversation's agent, serialized per conversation.
    * `onDelta` receives streamed model text and reasoning deltas as they are
    * produced (for incremental WeCom replies); it is optional and never called

@@ -38,6 +38,7 @@ interface StatusView {
     status: string
     model: string
     wecom: boolean
+    peer?: string
   }>
   process?: {
     memoryRss: number
@@ -74,14 +75,12 @@ export function formatUptime(seconds: number | null | undefined): string {
   return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`
 }
 
-/** Compact row label for one live agent. */
-export function agentLabel(agent: { sessionId: string; wecom: boolean }): string {
-  if (agent.wecom) {
-    const parts = agent.sessionId.split('-')
-    const scope = parts[2] ?? 'chat'
-    return `WeCom · ${scope}`
-  }
-  return `Web · ${agent.sessionId.slice(-6)}`
+/** Compact row label for one live WeCom agent. */
+export function agentLabel(agent: { sessionId: string; peer?: string }): string {
+  if (agent.peer !== undefined && agent.peer !== '') return agent.peer
+  const parts = agent.sessionId.split('-')
+  const scope = parts[2] ?? 'chat'
+  return `WeCom · ${scope}`
 }
 
 const CSS = [
@@ -256,7 +255,8 @@ export function apply(ctx: {
     }
 
     const agentNodes: React.ReactNode[] = []
-    const agents = status.agents ?? []
+    // Only WeCom conversations belong in this panel; web sessions are noise here.
+    const agents = (status.agents ?? []).filter((agent) => agent.wecom)
     for (const agent of agents.slice(0, 8)) {
       agentNodes.push(
         React.createElement(

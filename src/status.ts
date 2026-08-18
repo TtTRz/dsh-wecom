@@ -10,6 +10,8 @@ export interface AgentView {
   model: string
   /** Whether the session is a WeCom conversation of this plugin. */
   wecom: boolean
+  /** Display peer (userid or chatid) for WeCom conversations, when known. */
+  peer?: string
 }
 
 /** Node process + machine load snapshot. */
@@ -51,17 +53,23 @@ interface AgentLike {
   options?: { model?: string }
 }
 
-function agentView(agent: AgentLike): AgentView {
+function agentView(
+  agent: AgentLike,
+  peerOf: ((sessionId: string) => string | undefined) | undefined,
+): AgentView {
   const sessionId = String(agent.session.id)
   // The model a conversation actually runs on is folded from its logged
   // request headers — `agent.options` is only the creation-time snapshot and
   // goes stale once the session's model is switched in the web UI.
   const headerModel = agent.session.requestHeader?.()?.config?.model
+  const wecom = sessionId.startsWith('dsh-wecom-')
+  const peer = wecom ? peerOf?.(sessionId) : undefined
   return {
     sessionId,
     status: agent.status,
     model: typeof headerModel === 'string' ? headerModel : (agent.options?.model ?? ''),
-    wecom: sessionId.startsWith('dsh-wecom-'),
+    wecom,
+    ...(peer === undefined ? {} : { peer }),
   }
 }
 
@@ -81,8 +89,9 @@ export function statusPayload(
   snapshot: ChannelStatus,
   agents: readonly AgentLike[],
   sessionIds: readonly string[],
+  peerOf?: (sessionId: string) => string | undefined,
 ): StatusPayload {
-  const views = agents.map(agentView)
+  const views = agents.map((agent) => agentView(agent, peerOf))
   views.sort((a, b) => {
     if (a.status === b.status) return a.sessionId < b.sessionId ? -1 : 1
     return a.status === 'running' ? -1 : 1
@@ -124,7 +133,11 @@ interface PersistenceLike {
  * agents, process load, and session counts. Registering is optional: in
  * profiles without a web server this is a no-op disposer.
  */
-export function registerStatusRoute(ctx: Context, snapshot: () => ChannelStatus): () => void {
+export function registerStatusRoute(
+  ctx: Context,
+  snapshot: () => ChannelStatus,
+  peerOf?: (sessionId: string) => string | undefined,
+): () => void {
   const webServer = ctx.get('webServer') as WebServerLike | undefined
   if (webServer === undefined) return () => undefined
   return webServer.register({
@@ -142,7 +155,7 @@ export function registerStatusRoute(ctx: Context, snapshot: () => ChannelStatus)
         const persistence = ctx.get('sessionPersistence') as PersistenceLike | undefined
         const sessionIds =
           persistence === undefined ? [] : (await persistence.list()).map((h) => String(h.id))
-        send(200, statusPayload(snapshot(), agents, sessionIds))
+        send(200, statusPayload(snapshot(), agents, sessionIds, peerOf))
       } catch (error) {
         send(500, { available: false, error: String(error) })
       }

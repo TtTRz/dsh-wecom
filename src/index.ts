@@ -45,7 +45,15 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
   const status: ChannelStatusService = { snapshot: () => channel.snapshot() }
   ctx.provide('wecomChannelStatus', status)
   // Browser UI + dashboards: `GET /api/wecom/status` (a no-op without a web server).
-  ctx.effect(() => registerStatusRoute(ctx, () => channel.snapshot()), 'dsh-wecom.status-route')
+  ctx.effect(
+    () =>
+      registerStatusRoute(
+        ctx,
+        () => channel.snapshot(),
+        (id) => channel.peerOf(id),
+      ),
+    'dsh-wecom.status-route',
+  )
   // Browser UI control: `POST /api/wecom/restart` forces an immediate reconnect.
   ctx.effect(() => registerRestartRoute(ctx, () => channel.reconnect()), 'dsh-wecom.restart-route')
   await ctx.effect(async function* () {

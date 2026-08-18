@@ -307,6 +307,11 @@ export class WecomChannel {
     }
   }
 
+  /** Display peer (userid or chatid) of one conversation, when known. */
+  peerOf(sessionId: string): string | undefined {
+    return this.pool.peerOf(sessionId)
+  }
+
   private openClient(secret: string): BotClient {
     const sdkLogger: Logger = {
       debug: (message, ...args) => this.log.debug(message, ...args),

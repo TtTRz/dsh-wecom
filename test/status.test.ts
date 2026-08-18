@@ -70,6 +70,20 @@ describe('statusPayload', () => {
     expect(payload.agents[0]?.model).toBe('glm-5.3')
   })
 
+  it('attaches the chatid/userid peer to WeCom agents only', () => {
+    const payload = statusPayload(
+      snapshot,
+      [
+        { session: { id: 'dsh-wecom-group-a1b2c3' }, status: 'idle', options: { model: 'm' } },
+        { session: { id: 'session-web-1' }, status: 'idle', options: { model: 'm' } },
+      ],
+      [],
+      (id) => (id === 'dsh-wecom-group-a1b2c3' ? 'wrGroupChat' : undefined),
+    )
+    expect(payload.agents[0]?.peer).toBe('wrGroupChat')
+    expect(payload.agents[1]?.peer).toBeUndefined()
+  })
+
   it('counts total and WeCom sessions', () => {
     const payload = statusPayload(
       snapshot,

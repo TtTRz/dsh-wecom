@@ -32,9 +32,17 @@ describe('formatUptime', () => {
 })
 
 describe('agentLabel', () => {
-  it('labels WeCom conversations by scope and web sessions by tail', () => {
-    expect(agentLabel({ sessionId: 'dsh-wecom-single-abc123', wecom: true })).toBe('WeCom · single')
-    expect(agentLabel({ sessionId: 'dsh-wecom-group-xyz789', wecom: true })).toBe('WeCom · group')
-    expect(agentLabel({ sessionId: 'session-abc123def456', wecom: false })).toBe('Web · def456')
+  it('shows the chatid or userid peer when known', () => {
+    expect(agentLabel({ sessionId: 'dsh-wecom-single-abc123', peer: 'zhangsan' })).toBe(
+      'zhangsan',
+    )
+    expect(agentLabel({ sessionId: 'dsh-wecom-group-xyz789', peer: 'wrGroupChatId' })).toBe(
+      'wrGroupChatId',
+    )
+  })
+
+  it('falls back to the scope from the session id without a peer', () => {
+    expect(agentLabel({ sessionId: 'dsh-wecom-single-abc123' })).toBe('WeCom · single')
+    expect(agentLabel({ sessionId: 'dsh-wecom-group-xyz789' })).toBe('WeCom · group')
   })
 })

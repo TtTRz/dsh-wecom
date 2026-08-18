@@ -447,6 +447,7 @@ describe('AgentPool', () => {
     fireSessionEvent(agent?.session, event)
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(renamed).toEqual(['wrTestGroupChat：性能优化'])
+    expect(manager.peerOf(created[0]?.sessionId ?? '')).toBe('wrTestGroupChat')
   })
 
   it('reverts a manual rename back to the canonical title', async () => {

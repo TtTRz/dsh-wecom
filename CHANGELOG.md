@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.20] - 2026-08-17
+
+### Changed
+
+- The status panel now lists WeCom conversations only (web sessions are
+  filtered out), and each row's label is the conversation's chatid (groups)
+  or userid (single chats) resolved host-side, instead of the generic
+  `WeCom · single` / `WeCom · group` scope text. The peer is known once a
+  message touched the conversation in this process; until then the row falls
+  back to the scope label.
+
 ## [0.1.19] - 2026-08-17
 
 ### Fixed
