@@ -91,6 +91,7 @@ Tune the mounted row in `~/.dsh/profiles/web/cordis.patch.yml`:
 | --- | --- | --- |
 | `cwd` | `~/.wecom-sessions` | Agent working directory: WeCom sessions, uploads (`.wecom-uploads/`), and `.dsh-wecom-state.json` live here; the sidebar workspace "WeCom" is claimed on it. `DSH_WECOM_CWD` overrides it. Must be absolute |
 | `preset` | `standard` | Preset mounted into each conversation agent |
+| `provider` / `model` | unset | Fixed model route for every WeCom conversation; both must be set together. When unset, new conversations use the harness default selection and resumed conversations inherit their last logged model |
 | `dmPolicy` / `groupPolicy` | `open` | `open` / `allowlist` / `disabled` |
 | `dmAllowlist` | `[]` | Single-chat userid allowlist |
 | `groupAllowlist` | `[]` | Group-chat chatid allowlist |

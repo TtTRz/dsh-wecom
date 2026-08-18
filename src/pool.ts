@@ -2,7 +2,14 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import type { Agent, AgentHandle, AgentSetup } from '@deepseek-ai/dsh-agent'
+import {
+  type Agent,
+  type AgentHandle,
+  type AgentSetup,
+  installModelSelection,
+  type ModelSelection,
+  type ModelSelectionRef,
+} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-attachment'
@@ -103,6 +110,8 @@ export class AgentPool {
   private readonly peers = new Map<string, string>()
   /** Canonical title per conversation, enforced against manual renames. */
   private readonly canonicalTitles = new Map<string, string>()
+  /** Optional fixed model route from the plugin config (`provider` + `model`). */
+  private readonly configuredModel: ModelSelection | undefined
   private workspacePromise: Promise<WorkspaceLike | undefined> | undefined
 
   constructor(
@@ -111,6 +120,13 @@ export class AgentPool {
   ) {
     this.log = ctx.logger('dsh-wecom')
     this.semaphore = new Semaphore(config.maxConcurrent)
+    const provider = config.provider
+    const model = config.model
+    if ((provider === undefined) !== (model === undefined)) {
+      throw new Error('dsh-wecom: provider and model must be configured together')
+    }
+    this.configuredModel =
+      provider !== undefined && model !== undefined ? { provider, model } : undefined
     // Lock WeCom session titles host-wide: observe every title event, prefix
     // harness-generated LLM titles, and revert manual renames. A host-level
     // listener (not per-agent) covers sessions resumed outside this pool —
@@ -625,6 +641,7 @@ export class AgentPool {
         agentOptions,
         setup,
       })
+      this.inheritModelSelection(handle.agent)
       await this.groupSession(id)
       return handle
     }
@@ -635,9 +652,45 @@ export class AgentPool {
       agentOptions,
       setup,
     })
+    this.inheritModelSelection(handle.agent)
     this.persisted.add(id)
     await this.groupSession(id)
     return handle
+  }
+
+  /**
+   * Install the pool's model policy on one pool-owned agent: an explicit
+   * `provider`/`model` config wins; otherwise a resumed conversation keeps
+   * the model logged in its session header (so a web-UI model switch
+   * survives restarts); otherwise the harness default carried by
+   * {@link modelOptions} applies. Mirrors the harness's own per-agent
+   * selection, so a later web-UI switch still overrides it.
+   */
+  private inheritModelSelection(agent: Agent): void {
+    installModelSelection(agent.ctx, this.selectionFor(agent))
+  }
+
+  /** Mutable model-selection policy for one pool-owned agent. */
+  selectionFor(agent: Agent): ModelSelectionRef {
+    const configured = this.configuredModel
+    return {
+      get current(): ModelSelection | undefined {
+        if (configured !== undefined) return configured
+        const header = agent.session.requestHeader()
+        const config = header?.config
+        if (config?.provider !== undefined && config?.model !== undefined) {
+          return {
+            provider: config.provider,
+            model: config.model,
+            ...(config.reasoningEffort === undefined
+              ? {}
+              : { reasoningEffort: config.reasoningEffort }),
+          }
+        }
+        return undefined
+      },
+      assembled: undefined,
+    }
   }
 
   /**
@@ -704,6 +757,9 @@ export class AgentPool {
   }
 
   private modelOptions(): { provider: string; model: string } {
+    if (this.configuredModel !== undefined) {
+      return { provider: this.configuredModel.provider, model: this.configuredModel.model }
+    }
     const selection = this.ctx.agentDefaultModel.currentSelection()
     return { provider: selection.provider, model: selection.model }
   }
