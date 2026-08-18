@@ -89,6 +89,7 @@ dsh plugin --profile web add ./dsh-wecom-0.1.5.tgz
 | --- | --- | --- |
 | `cwd` | `~/.wecom-sessions` | agent 工作目录：WeCom 会话、上传文件（`.wecom-uploads/`）与 `.dsh-wecom-state.json` 都落在这里，侧边栏 "WeCom" 工作区也认领在该目录上；可用 `DSH_WECOM_CWD` 覆盖，必须为绝对路径 |
 | `preset` | `standard` | 挂进每个会话 agent 的 preset |
+| `provider` / `model` | 不设置 | 所有 wecom 会话的固定模型路由，两者必须成对配置；不设置时新会话用 harness 默认选择，恢复的会话继承其最后一次记录的模型 |
 | `dmPolicy` / `groupPolicy` | `open` | `open` / `allowlist` / `disabled` |
 | `dmAllowlist` | `[]` | 单聊 userid 白名单 |
 | `groupAllowlist` | `[]` | 群聊 chatid 白名单 |

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.24] - 2026-08-17
+
+### Added
+
+- Optional `provider` / `model` config pins one model route for every WeCom
+  conversation (both fields must be set together; a half-set pair fails
+  loudly at plugin startup).
+- Resumed WeCom conversations now inherit the model logged in their session
+  header when no explicit route is configured — a model switched in the web
+  UI stays in effect across restarts instead of reverting to the harness
+  default. The pool installs a per-agent model selection (the harness's own
+  mechanism), so a later web-UI switch still overrides everything.
+
 ## [0.1.23] - 2026-08-17
 
 ### Changed

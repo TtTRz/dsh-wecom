@@ -8,7 +8,7 @@ import { testConfig } from './test-config.js'
 interface FakeAgent {
   status: 'idle' | 'running'
   options: { provider: string; model: string }
-  session: { id: string; events: unknown[] }
+  session: { id: string; events: unknown[]; requestHeader?: () => unknown }
   ctx: {
     on: (event: string, handler: (...args: unknown[]) => void) => () => boolean
     systemPrompt: { section: ReturnType<typeof vi.fn> }
@@ -30,7 +30,7 @@ function makeAgent(
   const agent: FakeAgent = {
     status: 'idle',
     options: { provider: 'deepseek', model: 'deepseek-chat' },
-    session: { id: '', events },
+    session: { id: '', events, requestHeader: () => undefined },
     ctx: {
       on: (event: string, handler: (...args: unknown[]) => void) => {
         const set = handlers.get(event) ?? new Set<(...args: unknown[]) => void>()
@@ -109,10 +109,15 @@ function makeHarness() {
     },
     agents: {
       create: vi.fn(
-        async (options: { sessionId: string; setup?: (agentCtx: unknown) => Promise<void> }) => {
+        async (options: {
+          sessionId: string
+          agentOptions?: { provider: string; model: string }
+          setup?: (agentCtx: unknown) => Promise<void>
+        }) => {
           created.push({ sessionId: options.sessionId })
           const agent = makeAgent()
           agent.session.id = options.sessionId
+          if (options.agentOptions) agent.options = options.agentOptions
           if (options.setup) await options.setup({ systemPrompt: { section } })
           live.set(options.sessionId, agent)
           return {
@@ -127,10 +132,12 @@ function makeHarness() {
       resume: vi.fn(
         async (options: {
           resumeSessionId: string
+          agentOptions?: { provider: string; model: string }
           setup?: (agentCtx: unknown) => Promise<void>
         }) => {
           const agent = makeAgent()
           agent.session.id = options.resumeSessionId
+          if (options.agentOptions) agent.options = options.agentOptions
           if (options.setup) await options.setup({ systemPrompt: { section } })
           live.set(options.resumeSessionId, agent)
           return {
@@ -282,6 +289,46 @@ describe('AgentPool', () => {
     }
     expect(saved.epochs).toEqual({ [base]: 1 })
     expect(saved.peers).toEqual({ [base]: 'u1' })
+  })
+
+  it('uses the configured provider/model for new conversations', async () => {
+    const { ctx, live, created } = makeHarness()
+    const manager = new AgentPool(ctx as never, testConfig({ provider: 'venus', model: 'glm-5.3' }))
+    await manager.start()
+    await manager.handle(singleMessage('hello'), noopDownload)
+    const agent = live.get(created[0]?.sessionId ?? '') as FakeAgent | undefined
+    expect(agent?.options).toEqual({ provider: 'venus', model: 'glm-5.3' })
+  })
+
+  it('rejects a half-configured model route', () => {
+    expect(
+      () => new AgentPool(makeHarness().ctx as never, testConfig({ provider: 'venus' })),
+    ).toThrow('provider and model must be configured together')
+  })
+
+  it('selectionFor prefers the configured model over the logged header', () => {
+    const manager = new AgentPool(
+      makeHarness().ctx as never,
+      testConfig({ provider: 'v', model: 'm' }),
+    )
+    const agent = makeAgent()
+    agent.session.requestHeader = vi.fn(() => ({ config: { provider: 'p2', model: 'm2' } }))
+    expect(manager.selectionFor(agent as never).current).toEqual({ provider: 'v', model: 'm' })
+  })
+
+  it('selectionFor inherits the logged header model and falls back to none', () => {
+    const manager = new AgentPool(makeHarness().ctx as never, testConfig())
+    const agent = makeAgent()
+    agent.session.requestHeader = vi.fn(() => ({
+      config: { provider: 'p2', model: 'm2', reasoningEffort: 'high' },
+    }))
+    expect(manager.selectionFor(agent as never).current).toEqual({
+      provider: 'p2',
+      model: 'm2',
+      reasoningEffort: 'high',
+    })
+    const bare = makeAgent()
+    expect(manager.selectionFor(bare as never).current).toBeUndefined()
   })
 
   it('cancels the turn on response timeout', async () => {

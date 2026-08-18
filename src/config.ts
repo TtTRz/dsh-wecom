@@ -49,6 +49,14 @@ export interface Config {
   greeting: string
   /** Persistent prompt section layered on the preset persona on every turn. */
   instructions: string
+  /**
+   * Optional fixed model route for every WeCom conversation. Both fields must
+   * be set together; when absent, new conversations use the harness default
+   * model selection and resumed conversations inherit their last logged
+   * model (so web-UI model switches survive restarts).
+   */
+  provider?: string
+  model?: string
   /** Attach images when the model can view them (`auto`), or force always/never. */
   imageMode: ImageMode
   /** Stream model text deltas to WeCom as they are produced; `false` sends only the ack + final answer. */
@@ -101,6 +109,8 @@ export const Config: z<Config> = z.object({
   imageMode: z.union(['auto', 'always', 'never']).default('auto'),
   streaming: z.boolean().default(true),
   streamFlushMs: z.number().step(1).min(50).max(5_000).default(250),
+  provider: z.string(),
+  model: z.string(),
   showReasoning: z.boolean().default(true),
   showToolCalls: z.boolean().default(true),
   connectTimeoutMs: z.number().step(1).min(1).default(30_000),
