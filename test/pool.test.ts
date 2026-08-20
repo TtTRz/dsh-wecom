@@ -424,17 +424,28 @@ describe('AgentPool', () => {
     expect(added).toEqual([created[0]?.sessionId])
   })
 
-  it('re-attaches persisted conversations to the workspace at startup', async () => {
+  it('re-attaches persisted conversations whose stored cwd matches their per-chat dir', async () => {
     const attached: string[] = []
-    const create = vi.fn(async () => ({
+    const create = vi.fn(async (path: string) => ({
       attachSession: vi.fn(async (sessionId: string) => {
         attached.push(sessionId)
       }),
+      path,
     }))
     const { ctx } = makeHarness()
     ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue([
-      { id: 'dsh-wecom-single-abc' },
-      { id: 'dsh-wecom-group-xyz' },
+      // New-layout session: stored cwd equals its per-chat directory.
+      { id: 'dsh-wecom-single-abc', cwd: '/tmp/wecom-test/dsh-wecom-single-abc' },
+      // Epoch session of the same chat shares the base dir, so it re-attaches
+      // to the SAME workspace row instead of minting a new one.
+      { id: 'dsh-wecom-single-abc~g2', cwd: '/tmp/wecom-test/dsh-wecom-single-abc' },
+      // New-layout group chat.
+      { id: 'dsh-wecom-group-xyz', cwd: '/tmp/wecom-test/dsh-wecom-group-xyz' },
+      // Legacy session under the shared base: must NOT create a per-chat row.
+      { id: 'dsh-wecom-single-legacy', cwd: '/tmp/wecom-test' },
+      // Pre-fix epoch dir: stored cwd is the epoch-id directory, which no
+      // longer equals the (now base-id) conversation dir — skip, no new row.
+      { id: 'dsh-wecom-single-old~g1', cwd: '/tmp/wecom-test/dsh-wecom-single-old~g1' },
       { id: 'session-other' },
     ])
     ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
@@ -442,7 +453,19 @@ describe('AgentPool', () => {
     )
     const manager = new AgentPool(ctx as never, testConfig())
     await manager.start()
-    expect(attached).toEqual(['dsh-wecom-single-abc', 'dsh-wecom-group-xyz'])
+    expect(attached).toEqual([
+      'dsh-wecom-single-abc',
+      'dsh-wecom-single-abc~g2',
+      'dsh-wecom-group-xyz',
+    ])
+    // One workspace row per CHAT: both epochs of the single chat resolve to
+    // the same base-id directory, and legacy/mismatched cwds create nothing.
+    expect(create).toHaveBeenCalledTimes(2)
+    const paths = create.mock.calls.map((call) => call[0])
+    expect(paths).toEqual([
+      '/tmp/wecom-test/dsh-wecom-single-abc',
+      '/tmp/wecom-test/dsh-wecom-group-xyz',
+    ])
   })
 
   it('a failing attach never fails the message itself', async () => {
