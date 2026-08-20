@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -237,9 +237,44 @@ export class AgentPool {
    * chat shares it, so the sidebar shows ONE workspace row per chat and the
    * security boundary stays "between chats", which is the real boundary.
    * State and epoch data stay in the shared base directory.
+   *
+   * Directory naming: `{Chat|Group}_{peerId}_{firstSeen}_{hash6}` — readable
+   * peer id and the chat's first-seen timestamp, suffixed with 6 hash chars
+   * of the stable base id so renames and peer-id collisions can never merge
+   * or split a chat's identity. Pre-readable dirs (raw base id) are adopted
+   * as-is once a chat already has one, so live sessions never move.
    */
   private conversationDir(id: string): string {
-    return join(this.config.cwd, this.baseId(id))
+    const base = this.baseId(id)
+    const legacy = join(this.config.cwd, base)
+    if (existsSync(legacy)) return legacy
+    const hash6 = base.slice(-6)
+    const pattern = new RegExp(`^(Chat|Group)_.*_${hash6}$`)
+    try {
+      const hit = readdirSync(this.config.cwd).find((name) => pattern.test(name))
+      if (hit !== undefined) return join(this.config.cwd, hit)
+    } catch {
+      // base not readable yet — fall through to mint a new name
+    }
+    return join(this.config.cwd, `${this.chatScope(id)}_${this.peerTag(id)}_${this.firstSeenStamp()}_${hash6}`)
+  }
+
+  /** 'Chat' for single chats, 'Group' for group chats, from the id prefix. */
+  private chatScope(id: string): string {
+    return this.baseId(id).startsWith('dsh-wecom-group-') ? 'Group' : 'Chat'
+  }
+
+  /** Readable, filesystem-safe peer tag for the directory name. */
+  private peerTag(id: string): string {
+    const peer = this.peers.get(this.baseId(id)) ?? this.baseId(id)
+    return peer.replace(/[^A-Za-z0-9_-]+/g, '_').slice(0, 24) || 'peer'
+  }
+
+  /** Lexically sortable first-seen stamp for directory names. */
+  private firstSeenStamp(): string {
+    const d = new Date()
+    const pad = (n: number, w = 2) => String(n).padStart(w, '0')
+    return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
   }
 
   /**
@@ -576,9 +611,12 @@ export class AgentPool {
    * inactive scoped context (e.g. `agent.ctx.on`) throws, so re-open instead.
    */
   private async liveAgentForTurn(id: string, message: BaseMessage): Promise<Agent> {
+    // Record the peer BEFORE ensuring the agent: the per-chat directory name
+    // (minted inside ensureAgent) wants the readable peer id, and this is the
+    // only place the raw message is in hand.
+    this.rememberTitlePrefix(id, message)
     for (;;) {
       const agent = (await this.ensureAgent(id)).agent
-      this.rememberTitlePrefix(id, message)
       if (this.ctx.agents.get(SessionId(id)) === agent) return agent
       this.agents.delete(id)
     }
