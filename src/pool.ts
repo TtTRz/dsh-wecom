@@ -112,7 +112,7 @@ export class AgentPool {
   private readonly canonicalTitles = new Map<string, string>()
   /** Optional fixed model route from the plugin config (`provider` + `model`). */
   private readonly configuredModel: ModelSelection | undefined
-  private workspacePromise: Promise<WorkspaceLike | undefined> | undefined
+  private workspacePromise: Map<string, Promise<WorkspaceLike | undefined>> | undefined
 
   constructor(
     private readonly ctx: Context,
@@ -150,16 +150,16 @@ export class AgentPool {
     this.loadState()
     for (let attempt = 0; attempt < 4; attempt += 1) {
       try {
-        if ((await this.ensureWorkspace()) !== undefined) break
+        if (this.ctx.get('workspaceRegistry') !== undefined) break
       } catch {
         // Transient registry race; retried below and lazily per message.
       }
       await new Promise((resolve) => setTimeout(resolve, 250))
     }
     // Re-attach every conversation persisted by this plugin so conversations
-    // that predate a workspace-path change still regroup after a restart.
-    const workspace = await this.ensureWorkspace().catch(() => undefined)
-    if (workspace !== undefined) {
+    // regroup after a restart. The registry probe above gates the retry loop
+    // only; per-conversation workspaces resolve inside groupSession.
+    if (this.ctx.get('workspaceRegistry') !== undefined) {
       for (const id of this.persisted) {
         if (id.startsWith('dsh-wecom-')) await this.groupSession(id)
       }
@@ -167,36 +167,61 @@ export class AgentPool {
   }
 
   /**
-   * Resolve the grouping workspace once. Failures (including a not-yet-mounted
-   * registry) are forgotten so the next call retries instead of caching the
-   * miss forever.
+   * Resolve one conversation's grouping workspace. Failures (including a
+   * not-yet-mounted registry) are forgotten so the next call retries instead of
+   * caching the miss forever.
    */
-  private ensureWorkspace(): Promise<WorkspaceLike | undefined> {
-    if (this.workspacePromise !== undefined) return this.workspacePromise
-    const current = this.openWorkspace().then(
+  private ensureWorkspace(id: string): Promise<WorkspaceLike | undefined> {
+    this.workspacePromise ??= new Map()
+    const cached = this.workspacePromise.get(id)
+    if (cached !== undefined) return cached
+    const current = this.openWorkspace(id).then(
       (workspace) => {
-        if (workspace === undefined) this.forgetWorkspace(current)
+        if (workspace === undefined) this.forgetWorkspace(id, current)
         return workspace
       },
       (error) => {
-        this.forgetWorkspace(current)
+        this.forgetWorkspace(id, current)
         throw error
       },
     )
-    this.workspacePromise = current
+    this.workspacePromise.set(id, current)
     return current
   }
 
-  private forgetWorkspace(current: Promise<WorkspaceLike | undefined>): void {
-    if (this.workspacePromise === current) this.workspacePromise = undefined
+  private forgetWorkspace(id: string, current: Promise<WorkspaceLike | undefined>): void {
+    if (this.workspacePromise?.get(id) === current) {
+      this.workspacePromise.delete(id)
+    }
   }
 
-  private async openWorkspace(): Promise<WorkspaceLike | undefined> {
+  private async openWorkspace(id: string): Promise<WorkspaceLike | undefined> {
     const registry = this.ctx.get('workspaceRegistry') as WorkspaceRegistryLike | undefined
     if (registry === undefined) return undefined
-    // Workspace membership is validated by canonical cwd, so the workspace
-    // owns `cwd` itself and every agent runs there.
-    return registry.create(this.config.cwd, this.config.workspaceTitle)
+    // Workspace membership is validated by canonical cwd (the session cwd must
+    // equal the workspace path), and every conversation now runs in its own
+    // subdirectory (see conversationDir), so the grouping workspace is
+    // per-conversation too — one sidebar row per WeCom chat.
+    const cwd = this.conversationDir(id)
+    await mkdir(cwd, { recursive: true })
+    return registry.create(cwd, `${this.config.workspaceTitle} · ${this.shortId(id)}`)
+  }
+
+  /** Short, human-readable suffix for per-conversation workspace titles. */
+  private shortId(id: string): string {
+    return `${id.startsWith('dsh-wecom-group-') ? 'group' : 'chat'}·${id.slice(-6)}`
+  }
+
+  /**
+   * Per-conversation sandbox cwd: every WeCom chat gets its own subdirectory
+   * under the configured base, so the harness sandbox fence (workspace-write
+   * against SessionHeader.cwd) isolates each chat's filesystem — uploads and
+   * intermediate files from one chat are unreachable from another. The
+   * conversation id is `dsh-wecom-{group|single}-<hex>`, filesystem-safe by
+   * construction. State and epoch data stay in the shared base directory.
+   */
+  private conversationDir(id: string): string {
+    return join(this.config.cwd, id)
   }
 
   /**
@@ -207,7 +232,7 @@ export class AgentPool {
    */
   private async groupSession(id: string): Promise<void> {
     try {
-      const workspace = await this.ensureWorkspace()
+      const workspace = await this.ensureWorkspace(id)
       await workspace?.attachSession(id)
     } catch (error) {
       this.log.error('WeCom workspace attach failed for %s: %s', id, String(error))
@@ -576,7 +601,11 @@ export class AgentPool {
     })
     try {
       const includeImages = containsImageMedia(message) ? await this.canViewImages(agent) : false
-      const content = await toContentBlocks(message, this.mediaPort(download), includeImages)
+      const content = await toContentBlocks(
+        message,
+        this.mediaPort(download, String(agent.session.id)),
+        includeImages,
+      )
       agent.followup(createUserMessage({ content, source: { kind: 'user' } }))
       await this.settleTurn(agent)
     } finally {
@@ -648,7 +677,7 @@ export class AgentPool {
 
     const handle = await this.ctx.agents.create({
       sessionId,
-      meta: { cwd: this.config.cwd, agentPreset: resolvedPreset },
+      meta: { cwd: this.conversationDir(id), agentPreset: resolvedPreset },
       agentOptions,
       setup,
     })
@@ -725,9 +754,11 @@ export class AgentPool {
     }
   }
 
-  private mediaPort(download: MediaPort['download']): MediaPort {
+  private mediaPort(download: MediaPort['download'], sessionId: string): MediaPort {
     const attachments = this.ctx.attachments
-    const cwd = this.config.cwd
+    // Uploads land inside the conversation's own sandbox directory, so files
+    // shared by one chat are unreachable from another (see conversationDir).
+    const cwd = this.conversationDir(sessionId)
     return {
       download,
       saveImage: async (data, mediaType, name) => {
