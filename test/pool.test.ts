@@ -424,6 +424,26 @@ describe('AgentPool', () => {
     expect(added).toEqual([created[0]?.sessionId])
   })
 
+  it('mints readable per-chat directories (scope, peer, first-seen, hash6)', async () => {
+    const { ctx } = makeHarness()
+    const manager = new AgentPool(ctx as never, testConfig())
+    const dirOf = (id: string): string =>
+      (manager as unknown as { conversationDir(id: string): string }).conversationDir(id)
+    // peers map is empty in this harness, so the peer tag falls back to the
+    // slugified base id (24 chars); the stable identity suffix is the base
+    // id's LAST 6 chars.
+    const single = dirOf('dsh-wecom-single-00112233445566778899aabbccddee01')
+    expect(single).toMatch(
+      /\/tmp\/wecom-test\/Chat_dsh-wecom-single-0011223_\d{8}-\d{6}_ddee01$/,
+    )
+    const group = dirOf('dsh-wecom-group-00112233445566778899aabbccddee02')
+    expect(group).toMatch(
+      /\/tmp\/wecom-test\/Group_dsh-wecom-group-[0-9a-f]{7,24}_\d{8}-\d{6}_ddee02$/,
+    )
+    // Same chat resolves to the same minted dir (existing-dir adoption).
+    expect(dirOf('dsh-wecom-single-00112233445566778899aabbccddee01~g3')).toBe(single)
+  })
+
   it('re-attaches persisted conversations whose stored cwd matches their per-chat dir', async () => {
     const attached: string[] = []
     const create = vi.fn(async (path: string) => ({
