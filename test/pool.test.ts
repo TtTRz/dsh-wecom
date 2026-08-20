@@ -380,9 +380,12 @@ describe('AgentPool', () => {
     )
     const manager = new AgentPool(ctx as never, testConfig())
     await manager.start()
-    expect(create).toHaveBeenCalledWith('/tmp/wecom-test', 'WeCom')
 
     await manager.handle(singleMessage('one'), noopDownload)
+    // One per-conversation workspace under the base cwd, named after the chat.
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(create.mock.calls[0]?.[0]).toMatch(/^\/tmp\/wecom-test\/dsh-wecom-single-[0-9a-f]+$/)
+    expect(create.mock.calls[0]?.[1]).toMatch(/^WeCom · chat·[0-9a-f]{6}$/)
     expect(added).toEqual([created[0]?.sessionId])
 
     await manager.forget(singleMessage('reset'))
@@ -415,7 +418,9 @@ describe('AgentPool', () => {
       name === 'workspaceRegistry' ? { create } : undefined,
     )
     await manager.handle(singleMessage('one'), noopDownload)
-    expect(create).toHaveBeenCalledWith('/tmp/wecom-test', 'WeCom')
+    // The per-conversation workspace resolves lazily once the registry exists.
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(create.mock.calls[0]?.[0]).toMatch(/^\/tmp\/wecom-test\/dsh-wecom-single-[0-9a-f]+$/)
     expect(added).toEqual([created[0]?.sessionId])
   })
 
