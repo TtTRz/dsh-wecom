@@ -113,6 +113,8 @@ export class AgentPool {
   /** Optional fixed model route from the plugin config (`provider` + `model`). */
   private readonly configuredModel: ModelSelection | undefined
   private workspacePromise: Map<string, Promise<WorkspaceLike | undefined>> | undefined
+  /** Stored session cwd per conversation id, loaded at start and updated on create. */
+  private headerCwds = new Map<string, string>()
 
   constructor(
     private readonly ctx: Context,
@@ -146,6 +148,10 @@ export class AgentPool {
   async start(): Promise<void> {
     const headers = await this.ctx.sessionPersistence.list()
     this.persisted = new Set(headers.map((header) => String(header.id)))
+    for (const header of headers) {
+      const cwd = (header as { cwd?: string }).cwd
+      if (cwd !== undefined) this.headerCwds.set(String(header.id), cwd)
+    }
     await mkdir(this.config.cwd, { recursive: true })
     this.loadState()
     for (let attempt = 0; attempt < 4; attempt += 1) {
@@ -156,12 +162,18 @@ export class AgentPool {
       }
       await new Promise((resolve) => setTimeout(resolve, 250))
     }
-    // Re-attach every conversation persisted by this plugin so conversations
-    // regroup after a restart. The registry probe above gates the retry loop
-    // only; per-conversation workspaces resolve inside groupSession.
+    // Re-attach conversations whose session cwd already matches their
+    // per-chat directory, so they regroup after a restart. Sessions with a
+    // different stored cwd (legacy shared-base sessions) keep their existing
+    // grouping and never mint empty per-chat rows. The registry probe above
+    // gates the retry loop only; workspaces resolve inside groupSession.
     if (this.ctx.get('workspaceRegistry') !== undefined) {
-      for (const id of this.persisted) {
-        if (id.startsWith('dsh-wecom-')) await this.groupSession(id)
+      for (const header of headers) {
+        const id = String(header.id)
+        const cwd = (header as { cwd?: string }).cwd
+        if (id.startsWith('dsh-wecom-') && cwd !== undefined) {
+          await this.groupSession(id, cwd)
+        }
       }
     }
   }
@@ -172,26 +184,29 @@ export class AgentPool {
    * caching the miss forever.
    */
   private ensureWorkspace(id: string): Promise<WorkspaceLike | undefined> {
+    // Keyed by the per-chat directory, not the conversation id: every epoch
+    // of one chat resolves to the same workspace row and one create() call.
+    const dir = this.conversationDir(id)
     this.workspacePromise ??= new Map()
-    const cached = this.workspacePromise.get(id)
+    const cached = this.workspacePromise.get(dir)
     if (cached !== undefined) return cached
     const current = this.openWorkspace(id).then(
       (workspace) => {
-        if (workspace === undefined) this.forgetWorkspace(id, current)
+        if (workspace === undefined) this.forgetWorkspace(dir, current)
         return workspace
       },
       (error) => {
-        this.forgetWorkspace(id, current)
+        this.forgetWorkspace(dir, current)
         throw error
       },
     )
-    this.workspacePromise.set(id, current)
+    this.workspacePromise.set(dir, current)
     return current
   }
 
-  private forgetWorkspace(id: string, current: Promise<WorkspaceLike | undefined>): void {
-    if (this.workspacePromise?.get(id) === current) {
-      this.workspacePromise.delete(id)
+  private forgetWorkspace(dir: string, current: Promise<WorkspaceLike | undefined>): void {
+    if (this.workspacePromise?.get(dir) === current) {
+      this.workspacePromise.delete(dir)
     }
   }
 
@@ -209,19 +224,22 @@ export class AgentPool {
 
   /** Short, human-readable suffix for per-conversation workspace titles. */
   private shortId(id: string): string {
-    return `${id.startsWith('dsh-wecom-group-') ? 'group' : 'chat'}·${id.slice(-6)}`
+    const base = this.baseId(id)
+    return `${base.startsWith('dsh-wecom-group-') ? 'group' : 'chat'}·${base.slice(-6)}`
   }
 
   /**
-   * Per-conversation sandbox cwd: every WeCom chat gets its own subdirectory
-   * under the configured base, so the harness sandbox fence (workspace-write
-   * against SessionHeader.cwd) isolates each chat's filesystem — uploads and
+   * Per-chat sandbox cwd: every WeCom chat gets its own subdirectory under the
+   * configured base, so the harness sandbox fence (workspace-write against
+   * SessionHeader.cwd) isolates each chat's filesystem — uploads and
    * intermediate files from one chat are unreachable from another. The
-   * conversation id is `dsh-wecom-{group|single}-<hex>`, filesystem-safe by
-   * construction. State and epoch data stay in the shared base directory.
+   * directory is keyed by the epoch-free base id: every /reset epoch of one
+   * chat shares it, so the sidebar shows ONE workspace row per chat and the
+   * security boundary stays "between chats", which is the real boundary.
+   * State and epoch data stay in the shared base directory.
    */
   private conversationDir(id: string): string {
-    return join(this.config.cwd, id)
+    return join(this.config.cwd, this.baseId(id))
   }
 
   /**
@@ -230,7 +248,12 @@ export class AgentPool {
    * path (or any registry hiccup) must never fail the message itself — it
    * simply stays Ungrouped.
    */
-  private async groupSession(id: string): Promise<void> {
+  private async groupSession(id: string, headerCwd?: string): Promise<void> {
+    // Workspace membership validates the session cwd against the workspace
+    // path. Creating the row for a session whose header cwd differs (legacy
+    // sessions under the shared base, or pre-fix epoch dirs) would persist an
+    // empty row, so skip those entirely — they stay wherever they already sit.
+    if (headerCwd !== undefined && headerCwd !== this.conversationDir(id)) return
     try {
       const workspace = await this.ensureWorkspace(id)
       await workspace?.attachSession(id)
@@ -671,7 +694,7 @@ export class AgentPool {
         setup,
       })
       this.inheritModelSelection(handle.agent)
-      await this.groupSession(id)
+      await this.groupSession(id, this.headerCwds.get(id))
       return handle
     }
 
@@ -683,7 +706,8 @@ export class AgentPool {
     })
     this.inheritModelSelection(handle.agent)
     this.persisted.add(id)
-    await this.groupSession(id)
+    this.headerCwds.set(id, this.conversationDir(id))
+    await this.groupSession(id, this.conversationDir(id))
     return handle
   }
 
