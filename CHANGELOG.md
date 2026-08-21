@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.26] - 2026-08-21
+
+### Changed
+
+- Turn settling uses a no-progress timeout instead of a fixed total budget:
+  the deadline resets on every session event (reasoning deltas, tool calls,
+  assistant text), so long thinking passes and slow tool loops stay alive
+  while demonstrably moving; only a turn that goes silent for
+  `turnTimeoutMs` is cancelled, and that still surfaces as an error so the
+  user knows to retry.
+
+### Fixed
+
+- pnpm v11 install on the repo now approves esbuild's build script via
+  `pnpm.onlyBuiltDependencies`, unbreaking fresh checkouts.
+
 ## [0.1.25] - 2026-08-21
 
 ### Added
