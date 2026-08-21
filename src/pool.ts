@@ -222,9 +222,16 @@ export class AgentPool {
     return registry.create(cwd, `${this.config.workspaceTitle} · ${this.shortId(id)}`)
   }
 
-  /** Short, human-readable suffix for per-chat workspace titles. */
+  /**
+   * Human-readable suffix for per-chat workspace titles, derived from the
+   * minted directory name: 'WeCom-T32120019A-0821-a07268' yields
+   * 'T32120019A-0821' — peer id and first-seen date, without the hash tail.
+   * The directory is the single source of truth for the readable identity.
+   */
   private shortId(id: string): string {
-    return this.baseId(id).slice(-6)
+    const dir = this.conversationDir(id).split('/').pop() ?? ''
+    const stripped = dir.replace(/^WeCom-/, '').replace(/-[0-9a-f]{6}$/, '')
+    return stripped.length > 0 ? stripped : this.baseId(id).slice(-6)
   }
 
   /**
