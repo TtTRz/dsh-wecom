@@ -19,7 +19,7 @@ import type {} from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { BaseMessage } from '@wecom/aibot-node-sdk'
 import type { ResolvedConfig } from './config.js'
-import { conversationId, Semaphore, timeout } from './helpers.js'
+import { conversationId, Semaphore } from './helpers.js'
 import { type MediaPort, safeFilename, saveUploadFile } from './media.js'
 import { containsImageMedia, toContentBlocks } from './message.js'
 
@@ -698,15 +698,48 @@ export class AgentPool {
     return reply
   }
 
+  /**
+   * Wait for the agent's turn to settle with a NO-PROGRESS timeout: the
+   * deadline resets on every session event (thinking deltas, tool calls,
+   * assistant text), so a long reasoning pass or a slow tool loop keeps the
+   * turn alive as long as it is demonstrably moving. Only a turn that goes
+   * silent for turnTimeoutMs is treated as stuck — cancelled so the next
+   * message is not queued behind work that will never finish.
+   */
   private async settleTurn(agent: Agent): Promise<void> {
-    try {
-      await timeout(agent.whenIdle(), this.config.turnTimeoutMs, 'agent response')
-    } catch (error) {
-      // A timeout must not leave a zombie turn: cancel it so the next message
-      // is not queued behind work that will never finish.
-      if (agent.status !== 'idle') agent.cancel({ kind: 'user' })
-      throw error
+    const limitMs = this.config.turnTimeoutMs
+    let timedOut = false
+    let settle: (() => void) | undefined
+    const idle = new Promise<void>((resolve) => {
+      settle = resolve
+    })
+    let timer: NodeJS.Timeout | undefined
+    const arm = (): void => {
+      if (timedOut) return
+      if (timer !== undefined) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timedOut = true
+        if (agent.status !== 'idle') agent.cancel({ kind: 'user' })
+        settle?.()
+      }, limitMs)
     }
+    const off = agent.ctx.on('session/event', () => {
+      arm()
+    })
+    arm()
+    const watchIdle = agent.whenIdle().then(() => {
+      if (!timedOut) settle?.()
+    })
+    try {
+      await idle
+    } finally {
+      off()
+      if (timer !== undefined) clearTimeout(timer)
+      void watchIdle.catch(() => undefined)
+    }
+    // A silent no-progress timeout still surfaces as an error so the user
+    // knows to retry — only the timer semantics changed (progress resets it).
+    if (timedOut) throw new Error('agent response timed out')
   }
 
   private async ensureAgent(id: string): Promise<AgentHandle> {
