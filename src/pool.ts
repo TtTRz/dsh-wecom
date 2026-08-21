@@ -224,15 +224,25 @@ export class AgentPool {
 
   /**
    * Human-readable suffix for per-session workspace titles, derived from the
-   * minted directory name (the persistent fact): 'WeCom-T32120019A-0821-x'
-   * yields 'T32120019A-0821', with the epoch number appended when the
-   * session is a /reset epoch — distinguishing one peer's session rows.
+   * minted directory name (the persistent fact): 'WeCom-{peer}-0821-143025-x'
+   * yields '{peer} 08-21 14:30:25', with the epoch number appended when
+   * the session is a /reset epoch — distinguishing one peer's session rows.
    */
   private shortId(id: string): string {
     const dir = this.conversationDir(id).split('/').pop() ?? ''
     const stripped = dir.replace(/^WeCom-/, '').replace(/-[^-]*$/, '')
+    const m = /^(.+)-(\d{4})-(\d{2})(\d{2})(\d{2})$/.exec(stripped)
+    const pretty =
+      m !== null &&
+      m[1] !== undefined &&
+      m[2] !== undefined &&
+      m[3] !== undefined &&
+      m[4] !== undefined &&
+      m[5] !== undefined
+        ? `${m[1]} ${m[2].slice(0, 2)}-${m[2].slice(2)} ${m[3]}:${m[4]}:${m[5]}`
+        : stripped
     const epoch = /~g(\d+)$/.exec(id)
-    return epoch === null ? stripped : `${stripped} · ${epoch[1]}`
+    return epoch === null ? pretty : `${pretty} · ${epoch[1]}`
   }
 
   /**
@@ -273,11 +283,11 @@ export class AgentPool {
     return peer.replace(/[^A-Za-z0-9_-]+/g, '-').slice(0, 24) || 'peer'
   }
 
-  /** Month-day first-seen stamp (MMDD) for directory names. */
+  /** First-seen stamp (MMDD-HHmmss) for directory names. */
   private firstSeenStamp(): string {
     const d = new Date()
     const pad = (n: number) => String(n).padStart(2, '0')
-    return `${pad(d.getMonth() + 1)}${pad(d.getDate())}`
+    return `${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
   }
 
   /**
