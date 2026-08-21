@@ -384,8 +384,8 @@ describe('AgentPool', () => {
     await manager.handle(singleMessage('one'), noopDownload)
     // One per-conversation workspace under the base cwd, named after the chat.
     expect(create).toHaveBeenCalledTimes(1)
-    expect(create.mock.calls[0]?.[0]).toMatch(/^\/tmp\/wecom-test\/WeCom-u1-\d{4}-287789$/)
-    expect(create.mock.calls[0]?.[1]).toMatch(/^WeCom · .+-\d{4}$/)
+    expect(create.mock.calls[0]?.[0]).toMatch(/^\/tmp\/wecom-test\/WeCom-u1-\d{4}-\d{6}-287789$/)
+    expect(create.mock.calls[0]?.[1]).toMatch(/^WeCom · .+ \d{2}-\d{2} \d{2}:\d{2}:\d{2}$/)
     expect(added).toEqual([created[0]?.sessionId])
 
     await manager.forget(singleMessage('reset'))
@@ -420,7 +420,7 @@ describe('AgentPool', () => {
     await manager.handle(singleMessage('one'), noopDownload)
     // The per-conversation workspace resolves lazily once the registry exists.
     expect(create).toHaveBeenCalledTimes(1)
-    expect(create.mock.calls[0]?.[0]).toMatch(/^\/tmp\/wecom-test\/WeCom-u1-\d{4}-287789$/)
+    expect(create.mock.calls[0]?.[0]).toMatch(/^\/tmp\/wecom-test\/WeCom-u1-\d{4}-\d{6}-287789$/)
     expect(added).toEqual([created[0]?.sessionId])
   })
 
@@ -434,15 +434,15 @@ describe('AgentPool', () => {
     // id's LAST 6 chars.
     const single = dirOf('dsh-wecom-single-00112233445566778899aabbccddee01')
     expect(single).toMatch(
-      /\/tmp\/wecom-test\/WeCom-dsh-wecom-single-001122\d?-\d{4}-ddee01$/,
+      /\/tmp\/wecom-test\/WeCom-dsh-wecom-single-001122\d?-\d{4}-\d{6}-ddee01$/,
     )
     const group = dirOf('dsh-wecom-group-00112233445566778899aabbccddee02')
     expect(group).toMatch(
-      /\/tmp\/wecom-test\/WeCom-dsh-wecom-group-0011223\d?-\d{4}-ddee02$/,
+      /\/tmp\/wecom-test\/WeCom-dsh-wecom-group-0011223\d?-\d{4}-\d{6}-ddee02$/,
     )
     // A /reset epoch is its own session: its own dir (tail embeds ~g3)…
     const epoch = dirOf('dsh-wecom-single-00112233445566778899aabbccddee01~g3')
-    expect(epoch).toMatch(/\/tmp\/wecom-test\/WeCom-.+-\d{4}-e01~g3$/)
+    expect(epoch).toMatch(/\/tmp\/wecom-test\/WeCom-.+-\d{4}-\d{6}-e01~g3$/)
     expect(epoch).not.toBe(single)
     // …and each id resolves to the same dir on repeat (adoption).
     expect(dirOf('dsh-wecom-single-00112233445566778899aabbccddee01~g3')).toBe(epoch)
@@ -486,9 +486,9 @@ describe('AgentPool', () => {
     // their own row; mismatched cwds create nothing.
     expect(create).toHaveBeenCalledTimes(3)
     const paths = create.mock.calls.map((call) => call[0])
-    expect(paths[0]).toMatch(/^\/tmp\/wecom-test\/WeCom-.+-\d{4}-abcdef$/)
-    expect(paths[1]).toMatch(/^\/tmp\/wecom-test\/WeCom-.+-\d{4}-def~g2$/)
-    expect(paths[2]).toMatch(/^\/tmp\/wecom-test\/WeCom-.+-\d{4}-xyz789$/)
+    expect(paths[0]).toMatch(/^\/tmp\/wecom-test\/WeCom-.+-\d{4}-\d{6}-abcdef$/)
+    expect(paths[1]).toMatch(/^\/tmp\/wecom-test\/WeCom-.+-\d{4}-\d{6}-def~g2$/)
+    expect(paths[2]).toMatch(/^\/tmp\/wecom-test\/WeCom-.+-\d{4}-\d{6}-xyz789$/)
   })
 
   it('a failing attach never fails the message itself', async () => {
