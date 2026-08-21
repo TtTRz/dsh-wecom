@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.27] - 2026-08-21
+
+### Changed
+
+- `replyLimitBytes` schema ceiling raised from 20,480 to 204,800 bytes:
+  long reasoning + tool-heavy replies no longer need the `[reply truncated]`
+  marker so soon; deployments can raise the limit beyond 20 KB.
+
 ## [0.1.26] - 2026-08-21
 
 ### Changed

@@ -120,7 +120,7 @@ export const Config: z<Config> = z.object({
   maxReconnectAttempts: z.number().step(1).min(-1).default(10),
   maxAuthFailureAttempts: z.number().step(1).min(1).default(2),
   sendAttempts: z.number().step(1).min(0).max(5).default(2),
-  replyLimitBytes: z.number().step(1).min(100).max(20_480).default(20_000),
+  replyLimitBytes: z.number().step(1).min(100).max(204_800).default(20_000),
   dedupeLimit: z.number().step(1).min(100).max(100_000).default(5_000),
   maxConcurrent: z.number().step(1).min(1).max(64).default(4),
   /** Delay before the channel restarts after a dead or failed connection. */
