@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.25] - 2026-08-21
+
+### Added
+
+- Per-session sandbox cwd: every WeCom conversation (each `/reset` epoch is
+  its own session id) runs in its own directory under the configured base —
+  `WeCom-{userid|chatid}-{MMDD}-{hhmmss}-{id-tail}` — so the harness sandbox
+  fence isolates each session's filesystem, and one workspace row appears per
+  session with a readable title (`WeCom · {peer} {MM-DD} {HH:mm:ss}`,
+  derived from the minted directory name).
+- Session titles are topic-only now: the `userid:` / `chatid:` prefix is
+  gone; caller identity is carried by the per-session workspace row.
+
+### Changed
+
+- `/new` no longer disposes the previous session's agent: a disposed session
+  left the host's live-session projection, blanking its sidebar row until a
+  reload. The old conversation stays visible and resumable; teardown happens
+  at pool shutdown.
+- Uploads land inside the conversation's own sandbox directory.
+
+### Fixed
+
+- Restart re-grouping no longer mints empty workspace rows for legacy
+  sessions: rows are created only when the session's stored cwd matches its
+  per-session directory (anchored on the id tail).
+
 ## [0.1.24] - 2026-08-17
 
 ### Added
