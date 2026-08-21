@@ -384,8 +384,8 @@ describe('AgentPool', () => {
     await manager.handle(singleMessage('one'), noopDownload)
     // One per-conversation workspace under the base cwd, named after the chat.
     expect(create).toHaveBeenCalledTimes(1)
-    expect(create.mock.calls[0]?.[0]).toMatch(/^\/tmp\/wecom-test\/dsh-wecom-single-[0-9a-f]+$/)
-    expect(create.mock.calls[0]?.[1]).toMatch(/^WeCom · chat·[0-9a-f]{6}$/)
+    expect(create.mock.calls[0]?.[0]).toMatch(/^\/tmp\/wecom-test\/WeCom-u1-\d{4}-287789$/)
+    expect(create.mock.calls[0]?.[1]).toMatch(/^WeCom · 287789$/)
     expect(added).toEqual([created[0]?.sessionId])
 
     await manager.forget(singleMessage('reset'))
@@ -420,11 +420,11 @@ describe('AgentPool', () => {
     await manager.handle(singleMessage('one'), noopDownload)
     // The per-conversation workspace resolves lazily once the registry exists.
     expect(create).toHaveBeenCalledTimes(1)
-    expect(create.mock.calls[0]?.[0]).toMatch(/^\/tmp\/wecom-test\/dsh-wecom-single-[0-9a-f]+$/)
+    expect(create.mock.calls[0]?.[0]).toMatch(/^\/tmp\/wecom-test\/WeCom-u1-\d{4}-287789$/)
     expect(added).toEqual([created[0]?.sessionId])
   })
 
-  it('mints readable per-chat directories (scope, peer, first-seen, hash6)', async () => {
+  it('mints readable per-chat directories (WeCom-peer-MMDD-hash6)', async () => {
     const { ctx } = makeHarness()
     const manager = new AgentPool(ctx as never, testConfig())
     const dirOf = (id: string): string =>
@@ -434,11 +434,11 @@ describe('AgentPool', () => {
     // id's LAST 6 chars.
     const single = dirOf('dsh-wecom-single-00112233445566778899aabbccddee01')
     expect(single).toMatch(
-      /\/tmp\/wecom-test\/Chat_dsh-wecom-single-0011223_\d{8}-\d{6}_ddee01$/,
+      /\/tmp\/wecom-test\/WeCom-dsh-wecom-single-001122\d?-\d{4}-ddee01$/,
     )
     const group = dirOf('dsh-wecom-group-00112233445566778899aabbccddee02')
     expect(group).toMatch(
-      /\/tmp\/wecom-test\/Group_dsh-wecom-group-[0-9a-f]{7,24}_\d{8}-\d{6}_ddee02$/,
+      /\/tmp\/wecom-test\/WeCom-dsh-wecom-group-0011223\d?-\d{4}-ddee02$/,
     )
     // Same chat resolves to the same minted dir (existing-dir adoption).
     expect(dirOf('dsh-wecom-single-00112233445566778899aabbccddee01~g3')).toBe(single)
@@ -455,17 +455,17 @@ describe('AgentPool', () => {
     const { ctx } = makeHarness()
     ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue([
       // New-layout session: stored cwd equals its per-chat directory.
-      { id: 'dsh-wecom-single-abc', cwd: '/tmp/wecom-test/dsh-wecom-single-abc' },
+      { id: 'dsh-wecom-single-000abcdef', cwd: '/tmp/wecom-test/WeCom-u1-0821-abcdef' },
       // Epoch session of the same chat shares the base dir, so it re-attaches
       // to the SAME workspace row instead of minting a new one.
-      { id: 'dsh-wecom-single-abc~g2', cwd: '/tmp/wecom-test/dsh-wecom-single-abc' },
+      { id: 'dsh-wecom-single-000abcdef~g2', cwd: '/tmp/wecom-test/WeCom-u1-0821-abcdef' },
       // New-layout group chat.
-      { id: 'dsh-wecom-group-xyz', cwd: '/tmp/wecom-test/dsh-wecom-group-xyz' },
+      { id: 'dsh-wecom-group-000xyz789', cwd: '/tmp/wecom-test/WeCom-grp-0821-xyz789' },
       // Legacy session under the shared base: must NOT create a per-chat row.
-      { id: 'dsh-wecom-single-legacy', cwd: '/tmp/wecom-test' },
+      { id: 'dsh-wecom-single-000legacy', cwd: '/tmp/wecom-test' },
       // Pre-fix epoch dir: stored cwd is the epoch-id directory, which no
       // longer equals the (now base-id) conversation dir — skip, no new row.
-      { id: 'dsh-wecom-single-old~g1', cwd: '/tmp/wecom-test/dsh-wecom-single-old~g1' },
+      { id: 'dsh-wecom-single-000old~g1', cwd: '/tmp/wecom-test/WeCom-old-0821-00old' },
       { id: 'session-other' },
     ])
     ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
@@ -474,18 +474,19 @@ describe('AgentPool', () => {
     const manager = new AgentPool(ctx as never, testConfig())
     await manager.start()
     expect(attached).toEqual([
-      'dsh-wecom-single-abc',
-      'dsh-wecom-single-abc~g2',
-      'dsh-wecom-group-xyz',
+      'dsh-wecom-single-000abcdef',
+      'dsh-wecom-single-000abcdef~g2',
+      'dsh-wecom-group-000xyz789',
     ])
     // One workspace row per CHAT: both epochs of the single chat resolve to
     // the same base-id directory, and legacy/mismatched cwds create nothing.
     expect(create).toHaveBeenCalledTimes(2)
+    // Minted dir names carry the peer tag when known; this harness has no
+    // peers loaded, so assert the shape: WeCom-<tag>-<MMDD>-<hash6>, where
+    // hash6 anchors each chat's row.
     const paths = create.mock.calls.map((call) => call[0])
-    expect(paths).toEqual([
-      '/tmp/wecom-test/dsh-wecom-single-abc',
-      '/tmp/wecom-test/dsh-wecom-group-xyz',
-    ])
+    expect(paths[0]).toMatch(/^\/tmp\/wecom-test\/WeCom-.+-\d{4}-abcdef$/)
+    expect(paths[1]).toMatch(/^\/tmp\/wecom-test\/WeCom-.+-\d{4}-xyz789$/)
   })
 
   it('a failing attach never fails the message itself', async () => {
@@ -521,7 +522,7 @@ describe('AgentPool', () => {
     expect(renamed).toEqual([])
   })
 
-  it('prefixes a harness-generated LLM title with the userid for single chats', async () => {
+  it('keeps a harness-generated LLM title topic-only for single chats', async () => {
     const renamed: string[] = []
     const { ctx, live, created, fireSessionEvent } = makeHarness()
     ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
@@ -547,10 +548,12 @@ describe('AgentPool', () => {
     titleEvent(10, { kind: 'fallback' }, 'hello')
     titleEvent(11, { kind: 'provider', provider: 'session-title-first-prompt-llm' }, '性能优化')
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(renamed).toEqual(['u1：性能优化'])
+    // Session titles stay topic-only: no userid prefix (identity is carried
+    // by the per-chat workspace row).
+    expect(renamed).toEqual([])
   })
 
-  it('uses the group chatid as the title prefix for group chats', async () => {
+  it('keeps a harness-generated LLM title topic-only for group chats', async () => {
     const renamed: string[] = []
     const { ctx, live, created, fireSessionEvent } = makeHarness()
     ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
@@ -575,7 +578,7 @@ describe('AgentPool', () => {
     agent?.session.events.push(event)
     fireSessionEvent(agent?.session, event)
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(renamed).toEqual(['wrTestGroupChat：性能优化'])
+    expect(renamed).toEqual([])
     expect(manager.peerOf(created[0]?.sessionId ?? '')).toBe('wrTestGroupChat')
   })
 
@@ -603,7 +606,7 @@ describe('AgentPool', () => {
     titleEvent(10, { kind: 'provider', provider: 'session-title-first-prompt-llm' }, '性能优化')
     titleEvent(11, { kind: 'user' }, '手动改名')
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(renamed).toEqual(['u1：性能优化', 'u1：性能优化'])
+    expect(renamed).toEqual(['性能优化'])
   })
 
   it('reverts a manual rename of a legacy session to its previous title', async () => {
@@ -658,9 +661,9 @@ describe('AgentPool', () => {
       fireSessionEvent(agent?.session, event)
     }
     titleEvent(10, { kind: 'provider', provider: 'session-title-first-prompt-llm' }, '性能优化')
-    titleEvent(11, { kind: 'user' }, 'u1：性能优化')
+    titleEvent(11, { kind: 'user' }, '性能优化')
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(renamed).toEqual(['u1：性能优化'])
+    expect(renamed).toEqual([])
   })
 
   it('ignores title events of non-WeCom sessions', async () => {
