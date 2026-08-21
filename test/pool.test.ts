@@ -440,11 +440,15 @@ describe('AgentPool', () => {
     expect(group).toMatch(
       /\/tmp\/wecom-test\/WeCom-dsh-wecom-group-0011223\d?-\d{4}-ddee02$/,
     )
-    // Same chat resolves to the same minted dir (existing-dir adoption).
-    expect(dirOf('dsh-wecom-single-00112233445566778899aabbccddee01~g3')).toBe(single)
+    // A /reset epoch is its own session: its own dir (tail embeds ~g3)…
+    const epoch = dirOf('dsh-wecom-single-00112233445566778899aabbccddee01~g3')
+    expect(epoch).toMatch(/\/tmp\/wecom-test\/WeCom-.+-\d{4}-e01~g3$/)
+    expect(epoch).not.toBe(single)
+    // …and each id resolves to the same dir on repeat (adoption).
+    expect(dirOf('dsh-wecom-single-00112233445566778899aabbccddee01~g3')).toBe(epoch)
   })
 
-  it('re-attaches persisted conversations whose stored cwd matches their per-chat dir', async () => {
+  it('re-attaches persisted sessions whose stored cwd matches their per-session dir', async () => {
     const attached: string[] = []
     const create = vi.fn(async (path: string) => ({
       attachSession: vi.fn(async (sessionId: string) => {
@@ -458,7 +462,7 @@ describe('AgentPool', () => {
       { id: 'dsh-wecom-single-000abcdef', cwd: '/tmp/wecom-test/WeCom-u1-0821-abcdef' },
       // Epoch session of the same chat shares the base dir, so it re-attaches
       // to the SAME workspace row instead of minting a new one.
-      { id: 'dsh-wecom-single-000abcdef~g2', cwd: '/tmp/wecom-test/WeCom-u1-0821-abcdef' },
+      { id: 'dsh-wecom-single-000abcdef~g2', cwd: '/tmp/wecom-test/WeCom-u1-0821-def~g2' },
       // New-layout group chat.
       { id: 'dsh-wecom-group-000xyz789', cwd: '/tmp/wecom-test/WeCom-grp-0821-xyz789' },
       // Legacy session under the shared base: must NOT create a per-chat row.
@@ -478,15 +482,13 @@ describe('AgentPool', () => {
       'dsh-wecom-single-000abcdef~g2',
       'dsh-wecom-group-000xyz789',
     ])
-    // One workspace row per CHAT: both epochs of the single chat resolve to
-    // the same base-id directory, and legacy/mismatched cwds create nothing.
-    expect(create).toHaveBeenCalledTimes(2)
-    // Minted dir names carry the peer tag when known; this harness has no
-    // peers loaded, so assert the shape: WeCom-<tag>-<MMDD>-<hash6>, where
-    // hash6 anchors each chat's row.
+    // One row per SESSION: the base session and its /reset epoch each claim
+    // their own row; mismatched cwds create nothing.
+    expect(create).toHaveBeenCalledTimes(3)
     const paths = create.mock.calls.map((call) => call[0])
     expect(paths[0]).toMatch(/^\/tmp\/wecom-test\/WeCom-.+-\d{4}-abcdef$/)
-    expect(paths[1]).toMatch(/^\/tmp\/wecom-test\/WeCom-.+-\d{4}-xyz789$/)
+    expect(paths[1]).toMatch(/^\/tmp\/wecom-test\/WeCom-.+-\d{4}-def~g2$/)
+    expect(paths[2]).toMatch(/^\/tmp\/wecom-test\/WeCom-.+-\d{4}-xyz789$/)
   })
 
   it('a failing attach never fails the message itself', async () => {
