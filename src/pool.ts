@@ -225,8 +225,8 @@ export class AgentPool {
   /**
    * Human-readable suffix for per-session workspace titles, derived from the
    * minted directory name (the persistent fact): 'WeCom-{peer}-0821-143025-x'
-   * yields '{peer} 08-21 14:30:25', with the epoch number appended when
-   * the session is a /reset epoch — distinguishing one peer's session rows.
+   * yields '{peer} 08-21 14:30:25'. Concurrent sessions of one peer are
+   * distinguished by their timestamps alone.
    */
   private shortId(id: string): string {
     const dir = this.conversationDir(id).split('/').pop() ?? ''
@@ -241,8 +241,7 @@ export class AgentPool {
       m[5] !== undefined
         ? `${m[1]} ${m[2].slice(0, 2)}-${m[2].slice(2)} ${m[3]}:${m[4]}:${m[5]}`
         : stripped
-    const epoch = /~g(\d+)$/.exec(id)
-    return epoch === null ? pretty : `${pretty} · ${epoch[1]}`
+    return pretty
   }
 
   /**
