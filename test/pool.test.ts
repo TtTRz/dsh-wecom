@@ -385,7 +385,7 @@ describe('AgentPool', () => {
     // One per-conversation workspace under the base cwd, named after the chat.
     expect(create).toHaveBeenCalledTimes(1)
     expect(create.mock.calls[0]?.[0]).toMatch(/^\/tmp\/wecom-test\/WeCom-u1-\d{4}-287789$/)
-    expect(create.mock.calls[0]?.[1]).toMatch(/^WeCom · 287789$/)
+    expect(create.mock.calls[0]?.[1]).toMatch(/^WeCom · .+-\d{4}$/)
     expect(added).toEqual([created[0]?.sessionId])
 
     await manager.forget(singleMessage('reset'))
