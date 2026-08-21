@@ -222,10 +222,9 @@ export class AgentPool {
     return registry.create(cwd, `${this.config.workspaceTitle} · ${this.shortId(id)}`)
   }
 
-  /** Short, human-readable suffix for per-conversation workspace titles. */
+  /** Short, human-readable suffix for per-chat workspace titles. */
   private shortId(id: string): string {
-    const base = this.baseId(id)
-    return `${base.startsWith('dsh-wecom-group-') ? 'group' : 'chat'}·${base.slice(-6)}`
+    return this.baseId(id).slice(-6)
   }
 
   /**
@@ -246,35 +245,28 @@ export class AgentPool {
    */
   private conversationDir(id: string): string {
     const base = this.baseId(id)
-    const legacy = join(this.config.cwd, base)
-    if (existsSync(legacy)) return legacy
     const hash6 = base.slice(-6)
-    const pattern = new RegExp(`^(Chat|Group)_.*_${hash6}$`)
+    const pattern = new RegExp(`^WeCom-.*-${hash6}$`)
     try {
       const hit = readdirSync(this.config.cwd).find((name) => pattern.test(name))
       if (hit !== undefined) return join(this.config.cwd, hit)
     } catch {
       // base not readable yet — fall through to mint a new name
     }
-    return join(this.config.cwd, `${this.chatScope(id)}_${this.peerTag(id)}_${this.firstSeenStamp()}_${hash6}`)
-  }
-
-  /** 'Chat' for single chats, 'Group' for group chats, from the id prefix. */
-  private chatScope(id: string): string {
-    return this.baseId(id).startsWith('dsh-wecom-group-') ? 'Group' : 'Chat'
+    return join(this.config.cwd, `WeCom-${this.peerTag(id)}-${this.firstSeenStamp()}-${hash6}`)
   }
 
   /** Readable, filesystem-safe peer tag for the directory name. */
   private peerTag(id: string): string {
     const peer = this.peers.get(this.baseId(id)) ?? this.baseId(id)
-    return peer.replace(/[^A-Za-z0-9_-]+/g, '_').slice(0, 24) || 'peer'
+    return peer.replace(/[^A-Za-z0-9_-]+/g, '-').slice(0, 24) || 'peer'
   }
 
-  /** Lexically sortable first-seen stamp for directory names. */
+  /** Month-day first-seen stamp (MMDD) for directory names. */
   private firstSeenStamp(): string {
     const d = new Date()
-    const pad = (n: number, w = 2) => String(n).padStart(w, '0')
-    return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return `${pad(d.getMonth() + 1)}${pad(d.getDate())}`
   }
 
   /**
@@ -286,9 +278,15 @@ export class AgentPool {
   private async groupSession(id: string, headerCwd?: string): Promise<void> {
     // Workspace membership validates the session cwd against the workspace
     // path. Creating the row for a session whose header cwd differs (legacy
-    // sessions under the shared base, or pre-fix epoch dirs) would persist an
+    // sessions under the shared base, or another chat's dir) would persist an
     // empty row, so skip those entirely — they stay wherever they already sit.
-    if (headerCwd !== undefined && headerCwd !== this.conversationDir(id)) return
+    // Identity anchor: the dir's last 6 chars equal the base id's last 6.
+    if (headerCwd !== undefined) {
+      const base = this.baseId(id)
+      const hash6 = base.slice(-6)
+      const tail = headerCwd.split('/').pop() ?? ''
+      if (!tail.endsWith(`-${hash6}`)) return
+    }
     try {
       const workspace = await this.ensureWorkspace(id)
       await workspace?.attachSession(id)
@@ -300,11 +298,9 @@ export class AgentPool {
   /**
    * Remember the title prefix of a conversation. The harness generates
    * session titles automatically (an LLM short title); the prefix becomes the
-   * sidebar prefix ("前缀：标题") — the sender userid for single chats, the
-   * group chatid for group chats. Recorded before the message is delivered so
-   * the session-title watcher always has a prefix once a title event lands,
-   * and persisted under the conversation's base id so the status panel can
-   * show the peer right after a restart.
+   * per-chat directory name (see conversationDir). Recorded before the
+   * message is delivered, and persisted under the conversation's base id so
+   * the status panel can show the peer right after a restart.
    */
   private rememberTitlePrefix(id: string, message: BaseMessage): void {
     if (this.titlePrefixes.has(id)) return
@@ -340,10 +336,9 @@ export class AgentPool {
     if (typeof title !== 'string') return
     const kind = source?.kind
     if (kind === 'provider') {
-      const prefix = this.peerOf(id)
-      const canonical = prefix === undefined ? title : `${prefix}：${title}`
-      this.canonicalTitles.set(id, canonical)
-      if (prefix !== undefined) this.renameSession(session, canonical)
+      // Session titles stay topic-only: the caller identity is carried by the
+      // per-chat workspace row (directory), not by a per-session prefix.
+      this.canonicalTitles.set(id, title)
       return
     }
     if (kind === 'fallback') {
