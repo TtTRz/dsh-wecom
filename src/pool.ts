@@ -498,7 +498,12 @@ export class AgentPool {
     const handle = this.agents.get(oldId)
     if (handle === undefined) return
     this.agents.delete(oldId)
-    await handle.dispose()
+    // Deliberately NOT disposing the old agent: a disposed session leaves the
+    // host's live-session projection (host/session-removed), which erases its
+    // row content from the sidebar even though the log and workspace row are
+    // intact. Keeping the agent live keeps the previous conversation visible
+    // and resumable while the fresh epoch starts clean; the handle's own
+    // dispose stays wired into the pool's teardown for shutdown.
   }
 
   /** Tear down every agent once queued turns have settled. */

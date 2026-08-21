@@ -232,7 +232,9 @@ describe('AgentPool', () => {
     expect(created).toHaveLength(1)
 
     await manager.forget(singleMessage('reset'))
-    expect(disposed).toHaveLength(1)
+    // The old agent stays live (kept visible in the sidebar projection); the
+    // pool just stops routing this conversation to it.
+    expect(disposed).toHaveLength(0)
 
     await manager.handle(singleMessage('two'), noopDownload)
     expect(created).toHaveLength(2)
