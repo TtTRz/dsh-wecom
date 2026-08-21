@@ -223,15 +223,16 @@ export class AgentPool {
   }
 
   /**
-   * Human-readable suffix for per-chat workspace titles, derived from the
-   * minted directory name: 'WeCom-T32120019A-0821-a07268' yields
-   * 'T32120019A-0821' — peer id and first-seen date, without the hash tail.
-   * The directory is the single source of truth for the readable identity.
+   * Human-readable suffix for per-session workspace titles, derived from the
+   * minted directory name (the persistent fact): 'WeCom-T32120019A-0821-x'
+   * yields 'T32120019A-0821', with the epoch number appended when the
+   * session is a /reset epoch — distinguishing one peer's session rows.
    */
   private shortId(id: string): string {
     const dir = this.conversationDir(id).split('/').pop() ?? ''
-    const stripped = dir.replace(/^WeCom-/, '').replace(/-[0-9a-f]{6}$/, '')
-    return stripped.length > 0 ? stripped : this.baseId(id).slice(-6)
+    const stripped = dir.replace(/^WeCom-/, '').replace(/-[^-]*$/, '')
+    const epoch = /~g(\d+)$/.exec(id)
+    return epoch === null ? stripped : `${stripped} · ${epoch[1]}`
   }
 
   /**
@@ -251,16 +252,19 @@ export class AgentPool {
    * as-is once a chat already has one, so live sessions never move.
    */
   private conversationDir(id: string): string {
-    const base = this.baseId(id)
-    const hash6 = base.slice(-6)
-    const pattern = new RegExp(`^WeCom-.*-${hash6}$`)
+    // Keyed by the FULL session id: each /reset epoch (its own session id,
+    // ~gN suffix) mints a distinct directory, so every session gets its own
+    // sandbox cwd and its own workspace row.
+    const tail6 = id.slice(-6)
+    const escaped = tail6.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const pattern = new RegExp(`^WeCom-.*-${escaped}$`)
     try {
       const hit = readdirSync(this.config.cwd).find((name) => pattern.test(name))
       if (hit !== undefined) return join(this.config.cwd, hit)
     } catch {
       // base not readable yet — fall through to mint a new name
     }
-    return join(this.config.cwd, `WeCom-${this.peerTag(id)}-${this.firstSeenStamp()}-${hash6}`)
+    return join(this.config.cwd, `WeCom-${this.peerTag(id)}-${this.firstSeenStamp()}-${tail6}`)
   }
 
   /** Readable, filesystem-safe peer tag for the directory name. */
@@ -287,12 +291,12 @@ export class AgentPool {
     // path. Creating the row for a session whose header cwd differs (legacy
     // sessions under the shared base, or another chat's dir) would persist an
     // empty row, so skip those entirely — they stay wherever they already sit.
-    // Identity anchor: the dir's last 6 chars equal the base id's last 6.
+    // Identity anchor: the dir's last dash-segment equals the FULL session
+    // id's last 6 chars (epoch marker included — each epoch anchors its row).
     if (headerCwd !== undefined) {
-      const base = this.baseId(id)
-      const hash6 = base.slice(-6)
+      const tail6 = id.slice(-6)
       const tail = headerCwd.split('/').pop() ?? ''
-      if (!tail.endsWith(`-${hash6}`)) return
+      if (!tail.endsWith(`-${tail6}`)) return
     }
     try {
       const workspace = await this.ensureWorkspace(id)
