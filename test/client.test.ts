@@ -33,9 +33,7 @@ describe('formatUptime', () => {
 
 describe('agentLabel', () => {
   it('shows the chatid or userid peer when known', () => {
-    expect(agentLabel({ sessionId: 'dsh-wecom-single-abc123', peer: 'zhangsan' })).toBe(
-      'zhangsan',
-    )
+    expect(agentLabel({ sessionId: 'dsh-wecom-single-abc123', peer: 'zhangsan' })).toBe('zhangsan')
     expect(agentLabel({ sessionId: 'dsh-wecom-group-xyz789', peer: 'wrGroupChatId' })).toBe(
       'wrGroupChatId',
     )
