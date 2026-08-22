@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.28] - 2026-08-22
+
+### Added
+
+- Workspace deletions made in the web UI now stick: a runtime watcher polls
+  the workspace registry and records each deleted per-chat row as a
+  tombstone in `.dsh-wecom-state.json` (`deletedWorkspaces`), so the
+  startup regroup no longer recreates rows the user deleted. A fresh
+  message on a tombstoned conversation clears the tombstone and recreates
+  its row, so an accidental deletion self-heals on the next activity.
+  The poll interval is `AgentPool.DELETION_POLL_MS` (5 s; overridable in
+  tests).
+
 ## [0.1.27] - 2026-08-21
 
 ### Changed

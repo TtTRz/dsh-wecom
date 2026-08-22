@@ -401,6 +401,98 @@ describe('AgentPool', () => {
     await expect(manager.start()).resolves.toBeUndefined()
   })
 
+  it('tombstones a workspace deleted in the UI: no row on restart, row back on new activity', async () => {
+    const stateFile = '/tmp/wecom-test/.dsh-wecom-state.json'
+    // Shrink the poll interval so the watcher observes the deletion quickly.
+    AgentPool.DELETION_POLL_MS = 20
+    const rows: Array<{ path: string; title: string }> = []
+    const create = vi.fn(async (path: string, title: string) => {
+      const row = {
+        path,
+        title,
+        attachSession: vi.fn(async () => undefined),
+      }
+      rows.push(row)
+      return row
+    })
+    const makeRegistry = () => ({
+      create,
+      list: () => rows.map((row) => ({ path: row.path })),
+    })
+
+    // Boot 1: one message groups into one workspace row.
+    {
+      const { ctx } = makeHarness()
+      ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+        name === 'workspaceRegistry' ? makeRegistry() : undefined,
+      )
+      const manager = new AgentPool(ctx as never, testConfig())
+      await manager.start()
+      await manager.handle(singleMessage('one'), noopDownload)
+      expect(create).toHaveBeenCalledTimes(1)
+      // The deletion watcher sampled the baseline; give the poll one tick and
+      // then remove the row the way the web UI does.
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      rows.length = 0
+      await new Promise((resolve) => setTimeout(resolve, 60))
+      await manager.dispose()
+    }
+
+    // The tombstone persisted.
+    const state = JSON.parse(readFileSync(stateFile, 'utf8')) as {
+      deletedWorkspaces?: string[]
+    }
+    expect(state.deletedWorkspaces).toHaveLength(1)
+    expect(state.deletedWorkspaces?.[0]).toMatch(/WeCom-u1-\d{4}-\d{6}-287789$/)
+
+    // Boot 2 (restart): the persisted session regroups, but the tombstoned
+    // dir must NOT recreate its workspace row.
+    {
+      const { ctx, created } = makeHarness()
+      ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+        name === 'workspaceRegistry' ? makeRegistry() : undefined,
+      )
+      ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue([
+        {
+          id: 'dsh-wecom-single-7aa807000f4b59a39d6abc8a0aa07268~g1',
+          cwd: state.deletedWorkspaces?.[0],
+        },
+      ])
+      create.mockClear()
+      const manager = new AgentPool(ctx as never, testConfig())
+      await manager.start()
+      expect(create).toHaveBeenCalledTimes(0)
+      expect(rows).toHaveLength(0)
+
+      // New activity on the chat clears the tombstone: the row comes back.
+      await manager.handle(singleMessage('fresh'), noopDownload)
+      expect(create).toHaveBeenCalledTimes(1)
+      expect(rows).toHaveLength(1)
+      await manager.dispose()
+    }
+
+    // Boot 3: the revived row persists across another restart (no tombstone left).
+    {
+      const { ctx } = makeHarness()
+      ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+        name === 'workspaceRegistry' ? makeRegistry() : undefined,
+      )
+      ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue([
+        {
+          id: 'dsh-wecom-single-7aa807000f4b59a39d6abc8a0aa07268~g1',
+          cwd: rows[0]?.path,
+        },
+      ])
+      const manager = new AgentPool(ctx as never, testConfig())
+      await manager.start()
+      expect(create).toHaveBeenCalledTimes(1)
+      await manager.dispose()
+    }
+
+    rmSync(stateFile, { force: true })
+    AgentPool.DELETION_POLL_MS = 5_000
+  })
+
   it('creates the workspace lazily when the registry appears after startup', async () => {
     const added: string[] = []
     const create = vi.fn(async (path: string, title: string) => ({
@@ -439,9 +531,7 @@ describe('AgentPool', () => {
       /\/tmp\/wecom-test\/WeCom-dsh-wecom-single-001122\d?-\d{4}-\d{6}-ddee01$/,
     )
     const group = dirOf('dsh-wecom-group-00112233445566778899aabbccddee02')
-    expect(group).toMatch(
-      /\/tmp\/wecom-test\/WeCom-dsh-wecom-group-0011223\d?-\d{4}-\d{6}-ddee02$/,
-    )
+    expect(group).toMatch(/\/tmp\/wecom-test\/WeCom-dsh-wecom-group-0011223\d?-\d{4}-\d{6}-ddee02$/)
     // A /reset epoch is its own session: its own dir (tail embeds ~g3)…
     const epoch = dirOf('dsh-wecom-single-00112233445566778899aabbccddee01~g3')
     expect(epoch).toMatch(/\/tmp\/wecom-test\/WeCom-.+-\d{4}-\d{6}-e01~g3$/)

@@ -50,6 +50,8 @@ interface WorkspaceLike {
 }
 interface WorkspaceRegistryLike {
   create(path: string, title?: string): Promise<WorkspaceLike>
+  /** Structural face of the workspace entity list, used by the deletion watcher. */
+  list?(): { path?: string }[]
 }
 
 /** Structural face of the optional `sessionTitle` service. */
@@ -97,6 +99,9 @@ const COMPACT_FAILURE_TEXT: Readonly<Record<string, string>> = {
  * preset in its scoped setup so it inherits the preset's tools and persona.
  */
 export class AgentPool {
+  /** Deletion-watcher poll interval; static so tests can shrink it. */
+  static DELETION_POLL_MS = 5_000
+
   private readonly log
   private readonly agents = new Map<string, AgentHandle>()
   private readonly pending = new Map<string, Promise<AgentHandle>>()
@@ -115,6 +120,16 @@ export class AgentPool {
   private workspacePromise: Map<string, Promise<WorkspaceLike | undefined>> | undefined
   /** Stored session cwd per conversation id, loaded at start and updated on create. */
   private headerCwds = new Map<string, string>()
+  /**
+   * Per-chat directories whose workspace row the user deleted in the web UI.
+   * Tombstones are recorded by a runtime watcher and persisted in the state
+   * file; `start()` regrouping skips them so deleted rows stay deleted across
+   * restarts. A new message on the conversation clears its tombstone, so a
+   * chat that becomes active again gets its row back.
+   */
+  private readonly deletedDirs = new Set<string>()
+  /** Disposer for the deletion watcher interval, owned by this pool. */
+  private watcherDisposer: (() => void) | undefined
 
   constructor(
     private readonly ctx: Context,
@@ -176,21 +191,75 @@ export class AgentPool {
         }
       }
     }
+    this.startDeletionWatcher()
+  }
+
+  /**
+   * Watch the workspace registry while running: when a workspace row whose
+   * path lives under this pool's base cwd disappears (the user deleted it in
+   * the web UI — the registry emits no event, so this is polled), record the
+   * directory as a tombstone so `start()` regrouping skips it after a
+   * restart. Directories outside `config.cwd` (the admin workspaces, the
+   * ungrouped bucket) are ignored. The first snapshot primes the baseline
+   * without recording anything, so rows deleted before this boot (and
+   * already recreated by `start()` regrouping) are never spuriously
+   * tombstoned.
+   */
+  private startDeletionWatcher(): void {
+    if (this.watcherDisposer !== undefined) return
+    const registry = this.ctx.get('workspaceRegistry') as WorkspaceRegistryLike | undefined
+    if (registry === undefined || registry.list === undefined) return
+    const listNow = registry.list.bind(registry)
+    const baseline = new Set<string>()
+    for (const workspace of listNow()) {
+      const path = workspace.path
+      if (path !== undefined && path.startsWith(this.config.cwd)) baseline.add(path)
+    }
+    const timer = setInterval(() => {
+      const current = new Set<string>()
+      for (const workspace of listNow()) {
+        const path = workspace.path
+        if (path !== undefined && path.startsWith(this.config.cwd)) current.add(path)
+      }
+      let changed = false
+      for (const path of baseline) {
+        if (!current.has(path) && !this.deletedDirs.has(path)) {
+          this.deletedDirs.add(path)
+          changed = true
+          this.log.info(
+            'workspace row deleted in web UI; tombstoning %s (row stays deleted across restarts)',
+            path,
+          )
+        }
+      }
+      if (changed) this.saveState()
+      baseline.clear()
+      for (const path of current) baseline.add(path)
+    }, AgentPool.DELETION_POLL_MS)
+    timer.unref?.()
+    this.watcherDisposer = () => {
+      clearInterval(timer)
+      this.watcherDisposer = undefined
+    }
   }
 
   /**
    * Resolve one conversation's grouping workspace. Failures (including a
    * not-yet-mounted registry) are forgotten so the next call retries instead of
-   * caching the miss forever.
+   * caching the miss forever. A skipped (tombstoned) resolution is likewise
+   * never cached, so the revive path can succeed on a later message.
    */
-  private ensureWorkspace(id: string): Promise<WorkspaceLike | undefined> {
+  private ensureWorkspace(
+    id: string,
+    options: { revive?: boolean } = {},
+  ): Promise<WorkspaceLike | undefined> {
     // Keyed by the per-chat directory, not the conversation id: every epoch
     // of one chat resolves to the same workspace row and one create() call.
     const dir = this.conversationDir(id)
     this.workspacePromise ??= new Map()
     const cached = this.workspacePromise.get(dir)
     if (cached !== undefined) return cached
-    const current = this.openWorkspace(id).then(
+    const current = this.openWorkspace(id, options).then(
       (workspace) => {
         if (workspace === undefined) this.forgetWorkspace(dir, current)
         return workspace
@@ -210,7 +279,10 @@ export class AgentPool {
     }
   }
 
-  private async openWorkspace(id: string): Promise<WorkspaceLike | undefined> {
+  private async openWorkspace(
+    id: string,
+    options: { revive?: boolean } = {},
+  ): Promise<WorkspaceLike | undefined> {
     const registry = this.ctx.get('workspaceRegistry') as WorkspaceRegistryLike | undefined
     if (registry === undefined) return undefined
     // Workspace membership is validated by canonical cwd (the session cwd must
@@ -218,8 +290,32 @@ export class AgentPool {
     // subdirectory (see conversationDir), so the grouping workspace is
     // per-conversation too — one sidebar row per WeCom chat.
     const cwd = this.conversationDir(id)
+    // A tombstoned directory's row was deleted in the web UI. Restart
+    // regrouping (revive: false) honors the deletion — the session stays
+    // ungrouped. A fresh user message (revive: true) clears the tombstone and
+    // recreates the row, so a chat that becomes active again is visible once
+    // more.
+    if (this.deletedDirs.has(cwd)) {
+      if (options.revive !== true) return undefined
+      this.reviveTombstone(id)
+    }
     await mkdir(cwd, { recursive: true })
     return registry.create(cwd, `${this.config.workspaceTitle} · ${this.shortId(id)}`)
+  }
+
+  /**
+   * Fresh activity on a tombstoned conversation: drop every tombstone that
+   * matches this conversation's directory (dir identity is the tombstone
+   * key, so future epochs of the same chat regroup normally) and persist the
+   * change. Called only from the revive path of openWorkspace, i.e. exactly
+   * when a new user message wants its workspace row back.
+   */
+  private reviveTombstone(id: string): void {
+    const cwd = this.conversationDir(id)
+    if (!this.deletedDirs.has(cwd)) return
+    this.deletedDirs.delete(cwd)
+    this.saveState()
+    this.log.info('fresh activity on tombstoned chat %s; its workspace row will be recreated', cwd)
   }
 
   /**
@@ -295,7 +391,11 @@ export class AgentPool {
    * path (or any registry hiccup) must never fail the message itself — it
    * simply stays Ungrouped.
    */
-  private async groupSession(id: string, headerCwd?: string): Promise<void> {
+  private async groupSession(
+    id: string,
+    headerCwd?: string,
+    options: { revive?: boolean } = {},
+  ): Promise<void> {
     // Workspace membership validates the session cwd against the workspace
     // path. Creating the row for a session whose header cwd differs (legacy
     // sessions under the shared base, or another chat's dir) would persist an
@@ -308,7 +408,7 @@ export class AgentPool {
       if (!tail.endsWith(`-${tail6}`)) return
     }
     try {
-      const workspace = await this.ensureWorkspace(id)
+      const workspace = await this.ensureWorkspace(id, options)
       await workspace?.attachSession(id)
     } catch (error) {
       this.log.error('WeCom workspace attach failed for %s: %s', id, String(error))
@@ -508,6 +608,7 @@ export class AgentPool {
 
   /** Tear down every agent once queued turns have settled. */
   async dispose(): Promise<void> {
+    this.watcherDisposer?.()
     await Promise.allSettled(this.chains.values())
     await Promise.allSettled([...this.agents.values()].map((handle) => handle.dispose()))
     this.agents.clear()
@@ -534,10 +635,11 @@ export class AgentPool {
 
   /**
    * Restore the durable per-conversation state from disk: the reset epoch map
-   * (so `/new` survives restarts) and the display peer per base conversation
-   * id (so the status panel shows chatid/userid before the next message).
-   * Accepts both the current `{ epochs, peers }` shape and the legacy flat
-   * epoch map written by earlier versions.
+   * (so `/new` survives restarts), the display peer per base conversation
+   * id (so the status panel shows chatid/userid before the next message), and
+   * the deleted-workspace tombstones (so UI deletions survive restarts).
+   * Accepts both the current `{ epochs, peers, deletedWorkspaces }` shape and
+   * the legacy flat epoch map written by earlier versions.
    */
   private loadState(): void {
     try {
@@ -557,18 +659,22 @@ export class AgentPool {
         for (const [base, peer] of Object.entries(record.peers ?? {})) {
           if (typeof peer === 'string' && peer.length > 0) this.peers.set(base, peer)
         }
+        for (const dir of (record.deletedWorkspaces as unknown[]) ?? []) {
+          if (typeof dir === 'string' && dir.length > 0) this.deletedDirs.add(dir)
+        }
       }
     } catch (error) {
       this.log.warn('dsh-wecom state load failed: %s', String(error))
     }
   }
 
-  /** Persist epochs and peers so conversation state survives a restart. */
+  /** Persist epochs, peers, and deletion tombstones so conversation state survives a restart. */
   private saveState(): void {
     try {
       const state = {
         epochs: Object.fromEntries(this.epochs),
         peers: Object.fromEntries(this.peers),
+        deletedWorkspaces: [...this.deletedDirs],
       }
       writeFileSync(this.epochStateFile(), JSON.stringify(state), 'utf8')
     } catch (error) {
@@ -785,7 +891,7 @@ export class AgentPool {
         setup,
       })
       this.inheritModelSelection(handle.agent)
-      await this.groupSession(id, this.headerCwds.get(id))
+      await this.groupSession(id, this.headerCwds.get(id), { revive: true })
       return handle
     }
 
@@ -798,7 +904,7 @@ export class AgentPool {
     this.inheritModelSelection(handle.agent)
     this.persisted.add(id)
     this.headerCwds.set(id, this.conversationDir(id))
-    await this.groupSession(id, this.conversationDir(id))
+    await this.groupSession(id, this.conversationDir(id), { revive: true })
     return handle
   }
 
