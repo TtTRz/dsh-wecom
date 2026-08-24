@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.2.1] - 2026-08-24
+
+### Fixed
+
+- Approval acknowledgements (「已批准，继续执行。」/「已拒绝…」) are now sent
+  through the PROACTIVE channel (`sendMessage`) instead of opening a second
+  passive reply stream. Production trace showed the conversation's own reply
+  stream (opened with `Working…` and finished after the tool retry) never
+  reached the user when an approval ack fired as another passive
+  `finish=true` stream on the same chat mid-turn — the ack displaced the
+  pending reply. The proactive channel is fully independent of passive
+  streams, so both always deliver.
+- The final `finish=true` reply now falls back to a proactive push when the
+  passive stream rejects it (e.g. the 6-minute stream window expired with
+  errcode 846608, or the stream was displaced). Previously a failed final
+  frame silently dropped the finished answer; the error-path reply got the
+  same fallback.
+
 ## [0.2.0] - 2026-08-24
 
 ### Added

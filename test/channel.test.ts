@@ -20,6 +20,7 @@ function makeClient() {
       client.isConnected = false
     },
     replyStream: vi.fn(async () => undefined),
+    sendMessage: vi.fn(async () => undefined),
     replyWelcome: vi.fn(async () => undefined),
     downloadFile: vi.fn(async () => ({ buffer: new Uint8Array() })),
   }
@@ -28,6 +29,25 @@ function makeClient() {
     return handlers.get(event)?.(...args)
   }
   return { client: botClient, fire }
+}
+
+/** Fire one inbound text message at a running channel. */
+async function sendText(
+  fire: (event: string, ...args: unknown[]) => unknown,
+  text: string,
+  msgid = 'm1',
+): Promise<unknown> {
+  return fire('message', {
+    headers: { req_id: `r-${msgid}` },
+    body: {
+      msgid,
+      aibotid: 'bot',
+      chattype: 'single',
+      from: { userid: 'u1' },
+      msgtype: 'text',
+      text: { content: text },
+    },
+  })
 }
 
 function makeCtx() {
@@ -340,22 +360,71 @@ describe('WecomChannel streaming', () => {
       () => client,
     )
     await channel.start()
-    await fire('message', {
-      headers: { req_id: 'r1' },
-      body: {
-        msgid: 'm1',
-        aibotid: 'bot',
-        chattype: 'single',
-        from: { userid: 'u1' },
-        msgtype: 'text',
-        text: { content: '/clear' },
-      },
-    })
+    await sendText(fire, '/clear')
 
     const calls = (client as unknown as { replyStream: ReturnType<typeof vi.fn> }).replyStream.mock
       .calls
     expect(calls.at(-1)?.[2]).toBe('Started a new conversation.')
     expect(calls.at(-1)?.[3]).toBe(true)
+  })
+
+  it('sends the approval ack through the proactive channel, never the passive stream', async () => {
+    // A pending approval exists for this chat: the pool's interceptor
+    // (normally installed by wireApprovals) returns an outcome.
+    const { client, fire } = makeClient()
+    const channel = new WecomChannel(
+      makeStreamingSetup([], 'unused') as never,
+      testConfig({ streamFlushMs: 5_000 }),
+      () => client,
+    )
+    await channel.start()
+    const intercept = (
+      channel as unknown as { interceptApprovalReply: (m: unknown) => string | undefined }
+    ).interceptApprovalReply
+    ;(channel as unknown as { interceptApprovalReply: unknown }).interceptApprovalReply = () =>
+      'allowed-once'
+    expect(intercept).toBeDefined()
+
+    await sendText(fire, '批准', 'm-approve')
+
+    const replyCalls = (client as unknown as { replyStream: ReturnType<typeof vi.fn> }).replyStream
+      .mock.calls
+    const sendCalls = (client as unknown as { sendMessage: ReturnType<typeof vi.fn> }).sendMessage
+      .mock.calls
+    // The ack MUST ride sendMessage (proactive): a passive stream here can
+    // displace the conversation's still-open reply stream.
+    expect(replyCalls).toHaveLength(0)
+    expect(sendCalls).toHaveLength(1)
+    expect(sendCalls[0]?.[0]).toBe('u1')
+    expect(String(sendCalls[0]?.[1]?.markdown?.content)).toContain('已批准')
+  })
+
+  it('falls back to a proactive push when the final stream reply fails', async () => {
+    const { client, fire } = makeClient()
+    // The final finish=true frame is rejected by the server (e.g. stream
+    // window expired, errcode 846608); every retry fails too.
+    let callCount = 0
+    ;(
+      client as unknown as { replyStream: ReturnType<typeof vi.fn> }
+    ).replyStream.mockImplementation(async () => {
+      callCount += 1
+      if (callCount >= 2) throw new Error('Reply ack error: errcode 846608')
+      return undefined
+    })
+    const channel = new WecomChannel(
+      makeStreamingSetup([], 'Final answer') as never,
+      testConfig({ streamFlushMs: 5_000, sendAttempts: 1 }),
+      () => client,
+    )
+    await channel.start()
+    await sendText(fire, 'hi', 'm1')
+
+    const sendCalls = (client as unknown as { sendMessage: ReturnType<typeof vi.fn> }).sendMessage
+      .mock.calls
+    // The finished answer still reaches the user through sendMessage.
+    expect(sendCalls).toHaveLength(1)
+    expect(sendCalls[0]?.[0]).toBe('u1')
+    expect(String(sendCalls[0]?.[1]?.markdown?.content)).toContain('Final answer')
   })
 })
 

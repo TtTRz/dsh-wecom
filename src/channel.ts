@@ -17,7 +17,7 @@ import {
   type WsFrameHeaders,
 } from '@wecom/aibot-node-sdk'
 import type { ResolvedConfig } from './config.js'
-import { clipUtf8, Dedupe, timeout } from './helpers.js'
+import { clipUtf8, Dedupe, replyTarget, timeout } from './helpers.js'
 import { AgentPool, type Reply } from './pool.js'
 
 /** The subset of the official SDK this channel calls (kept minimal for test doubles). */
@@ -372,16 +372,20 @@ export class WecomChannel {
 
     // Approval replies answer a pending escalation of THIS chat; they are
     // consumed here and never reach the agent turn (which is still waiting
-    // on the escalation's approval request).
+    // on the escalation's approval request). Deliberately sent through the
+    // PROACTIVE channel (sendMessage), never the passive reply stream: the
+    // conversation's own turn still holds an open passive stream for its
+    // pending reply, and a second passive stream on another message of the
+    // same chat can displace it — the turn's final reply then never reaches
+    // the user (observed in production).
     const outcome = this.interceptApprovalReply(message)
     if (outcome !== undefined) {
-      const streamId = generateReqId('dsh')
-      await this.sendStream(
-        frame,
-        streamId,
-        outcome === 'allowed-once' ? '已批准，继续执行。' : '已拒绝，该操作不会执行。',
-        true,
-      )
+      const text = outcome === 'allowed-once' ? '已批准，继续执行。' : '已拒绝，该操作不会执行。'
+      try {
+        await this.pushToChatOf(message, text)
+      } catch (error) {
+        this.log.error('WeCom approval ack failed: %s', String(error))
+      }
       return
     }
 
@@ -419,13 +423,20 @@ export class WecomChannel {
       // Cards rendered during the turn ride the final stream frame as image
       // msg_item entries (SDK: msg_item only on finish=true; max 10; 10MB each).
       const msgItem = await this.replyImages(reply)
-      await this.sendStream(
-        frame,
-        streamId,
-        clipUtf8(this.renderReply(reply), this.config.replyLimitBytes),
-        true,
-        msgItem,
-      )
+      const finalText = clipUtf8(this.renderReply(reply), this.config.replyLimitBytes)
+      try {
+        await this.sendStream(frame, streamId, finalText, true, msgItem)
+      } catch (streamError) {
+        // The passive stream can die mid-turn (stream window expired — the
+        // server answers a non-zero errcode such as 846608 — or the stream was
+        // displaced). Fall back to the proactive channel so the finished
+        // answer still reaches the user instead of silently vanishing.
+        this.log.error(
+          'WeCom final stream reply failed (falling back to proactive push): %s',
+          String(streamError),
+        )
+        await this.pushToChatOf(message, finalText)
+      }
     } catch (error) {
       this.log.error('WeCom message %s failed: %s', message.msgid, String(error))
       const detail = error instanceof Error ? error.message : String(error)
@@ -438,6 +449,14 @@ export class WecomChannel {
         )
       } catch (sendError) {
         this.log.error('WeCom error reply failed: %s', String(sendError))
+        try {
+          await this.pushToChatOf(
+            message,
+            clipUtf8(`Something went wrong: ${detail}`, this.config.replyLimitBytes),
+          )
+        } catch (pushError) {
+          this.log.error('WeCom error fallback push failed: %s', String(pushError))
+        }
       }
     }
   }
@@ -654,6 +673,20 @@ export class WecomChannel {
   private async pushToSession(sessionId: string, text: string): Promise<void> {
     const peer = this.pool.peerOf(stripEpochOf(sessionId))
     if (peer === undefined) throw new Error(`dsh-wecom: no chat target known for ${sessionId}`)
+    await this.pushToPeer(peer, text)
+  }
+
+  /**
+   * Proactively deliver one text into the chat a message came from: the same
+   * sendMessage channel as {@link pushToSession}, resolving the target from
+   * the message itself (used for approval acks, where the inbound frame is
+   * at hand).
+   */
+  private async pushToChatOf(message: BaseMessage, text: string): Promise<void> {
+    await this.pushToPeer(replyTarget(message), text)
+  }
+
+  private async pushToPeer(peer: string, text: string): Promise<void> {
     await this.retry(async () =>
       timeout(
         this.liveClient().sendMessage(peer, {
@@ -661,7 +694,7 @@ export class WecomChannel {
           markdown: { content: clipUtf8(text, this.config.replyLimitBytes) },
         }),
         this.config.sendTimeoutMs,
-        'WeCom approval push',
+        'WeCom proactive push',
       ),
     )
   }
