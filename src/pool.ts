@@ -17,9 +17,10 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { type Session, type SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-system-prompt'
-import type { BaseMessage } from '@wecom/aibot-node-sdk'
+import type {} from '@deepseek-ai/dsh-user-approval'
+import type { BaseMessage, Logger } from '@wecom/aibot-node-sdk'
 import type { ResolvedConfig } from './config.js'
-import { conversationId, Semaphore } from './helpers.js'
+import { clipUtf8, conversationId, Semaphore } from './helpers.js'
 import { type MediaPort, safeFilename, saveUploadFile } from './media.js'
 import { containsImageMedia, toContentBlocks } from './message.js'
 
@@ -93,6 +94,236 @@ const COMPACT_FAILURE_TEXT: Readonly<Record<string, string>> = {
   persistence: 'Compaction finished, but the session could not be saved.',
 }
 
+/** One pending in-chat approval, resolved through the chat or by timeout. */
+interface PendingApproval {
+  /** The approval id from the `approval/asked` audit event. */
+  approvalId: string
+  /** Full WeCom session id the requesting agent serves. */
+  sessionId: string
+  /** Tool name + asker reason, shown in the pushed request. */
+  toolName: string
+  reason: string
+  resolve: (outcome: 'allowed-once' | 'rejected') => void
+  timer: ReturnType<typeof setTimeout>
+}
+
+/**
+ * Bridge between the harness approval waterfall and WeCom chats. When a
+ * WeCom-pool agent escalates its sandbox (a tool retry with wider
+ * permissions), the harness asks the composed answerers; this bridge claims
+ * the request, pushes it into the chat that triggered it, and resolves from
+ * the chat's reply. Registered with `prepend` so it runs BEFORE the web-UI
+ * answerer — an unanswered push falls through to `next()` only when the
+ * bridge is disabled or cannot reach the chat, never after it claimed the
+ * ask; a web approval clicked meanwhile is simply ignored (fail-safe: no
+ * double answerer, first claim wins).
+ */
+export class ApprovalBridge {
+  /** In-chat approval wait; static so tests can shrink it. */
+  static TIMEOUT_MS = 300_000
+
+  /** Pending approvals by approval id. */
+  private readonly pending = new Map<string, PendingApproval>()
+  private off: (() => void) | undefined
+
+  constructor(
+    private readonly log: Logger,
+    private readonly config: ResolvedConfig,
+  ) {}
+
+  /**
+   * Register the waterfall listener on the plugin context. Host-level and
+   * agent-scoped by the waterfall itself, so it only ever sees requests from
+   * THIS pool's agents when it is registered on their shared context; the
+   * sessionId guard keeps foreign sessions (a web-resumed WeCom conversation
+   * triggered elsewhere) from being answered from an unrelated chat.
+   */
+  start(
+    ctx: Context,
+    ownsSession: (sessionId: string) => boolean,
+    push: (sessionId: string, text: string) => Promise<void>,
+  ): void {
+    this.ownsSession = ownsSession
+    this.push = push
+    this.off = ctx.on('approval/request', (req, next) => this.onRequest(req, next), {
+      prepend: true,
+    })
+  }
+
+  private ownsSession: (sessionId: string) => boolean = () => false
+  private push: (sessionId: string, text: string) => Promise<void> = () => Promise.resolve()
+
+  /** Drop the listener; pending approvals resolve as rejected. */
+  dispose(): void {
+    this.off?.()
+    this.off = undefined
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer)
+      pending.resolve('rejected')
+    }
+    this.pending.clear()
+  }
+
+  /**
+   * Parse one WeCom text message as an approval reply. Returns the outcome
+   * when the text is a reply word AND at least one approval is pending for
+   * that sender's chat; `undefined` means "not an approval reply" (the
+   * message flows into the normal agent turn).
+   */
+  reply(
+    message: BaseMessage,
+    conversationIdOf: (message: BaseMessage) => string,
+  ): 'allowed-once' | 'rejected' | undefined {
+    if (this.pending.size === 0) return undefined
+    if (message.msgtype !== 'text') return undefined
+    const text = normalizeReply(message.text?.content ?? '')
+    if (text === '') return undefined
+    const outcome = APPROVAL_REPLIES[text]
+    if (outcome === undefined) return undefined
+    if (!this.authorizedSender(message)) return undefined
+    const sessionId = conversationIdOf(message)
+    // Answer the newest pending approval of the SAME chat (base id): the
+    // reply is meant for the chat's own escalation, and multiple chats never
+    // share a conversation id.
+    for (const pending of [...this.pending.values()].reverse()) {
+      if (this.sameChat(pending.sessionId, sessionId)) {
+        // `resolve` IS `settle`: it removes the pending entry (idempotent
+        // double-settle guard), stops the timer, and resolves the ask.
+        pending.resolve(outcome)
+        return outcome
+      }
+    }
+    return undefined
+  }
+
+  /** An unauthorized sender's reply words are ignored (not treated as approval answers). */
+  private authorizedSender(message: BaseMessage): boolean {
+    if (this.config.approvalAllowlist.length === 0) return true
+    return this.config.approvalAllowlist.includes(message.from.userid)
+  }
+
+  /** Two WeCom session ids belong to one chat when their base ids match. */
+  private sameChat(a: string, b: string): boolean {
+    return stripEpoch(a) === stripEpoch(b)
+  }
+
+  private async onRequest(
+    req: ApprovalRequestLike,
+    next: () => Promise<ApprovalOutcomeLike>,
+  ): Promise<ApprovalOutcomeLike> {
+    const sessionId = String(req.agent.session.id)
+    if (this.config.approvalMode === 'off' || this.config.approvalMode === 'notify') {
+      if (this.config.approvalMode === 'notify' && this.ownsSession(sessionId)) {
+        // Notification-only: surface the ask, decide nothing.
+        void this.push(sessionId, this.renderAsk(req.toolName, req.reason ?? '')).catch(
+          () => undefined,
+        )
+      }
+      return next()
+    }
+    if (!this.ownsSession(sessionId)) return next()
+    if (req.signal?.aborted === true) return 'cancelled'
+    const approvalId = this.approvalIdOf(req)
+    if (approvalId === undefined) return next()
+
+    return new Promise<ApprovalOutcomeLike>((resolve) => {
+      const timer: ReturnType<typeof setTimeout> = setTimeout(
+        () => settle('cancelled'),
+        ApprovalBridge.TIMEOUT_MS,
+      )
+      const settle = (outcome: 'allowed-once' | 'rejected' | 'cancelled'): void => {
+        if (this.pending.delete(approvalId)) {
+          clearTimeout(timer)
+          resolve(outcome)
+        }
+      }
+      timer.unref?.()
+      this.pending.set(approvalId, {
+        approvalId,
+        sessionId,
+        toolName: req.toolName,
+        reason: req.reason ?? '',
+        resolve: settle,
+        timer,
+      })
+      const ask = this.renderAsk(req.toolName, req.reason ?? '')
+      const push = this.push
+      void push(sessionId, ask).catch((error) => {
+        this.log.warn('WeCom approval push failed (waiting in chat anyway): %s', String(error))
+      })
+      const signal = req.signal
+      const onAbort = (): void => settle('cancelled')
+      signal?.addEventListener?.('abort', onAbort, { once: true })
+    })
+  }
+
+  /** The audit `approval/asked` id for this ask, from the session log tail. */
+  private approvalIdOf(req: ApprovalRequestLike): string | undefined {
+    const events = req.agent.session.events as readonly {
+      type?: string
+      data?: { id?: unknown; callId?: unknown }
+    }[]
+    const decided = new Set<unknown>()
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]
+      if (event === undefined) continue
+      if (event.type === 'approval/decided') decided.add(event.data?.id)
+      else if (event.type === 'approval/asked') {
+        const id = event.data?.id
+        if (id !== undefined && !decided.has(id)) return String(id)
+      }
+    }
+    return undefined
+  }
+
+  private renderAsk(toolName: string, reason: string): string {
+    const clipped = reason.trim() ? `\n${clipUtf8(reason, 500, '…')}` : ''
+    return `⚠️ 需要审批（工具 ${toolName}）${clipped}\n${this.config.approvalHint}`
+  }
+}
+
+/** Reply words → outcome; normalized (trimmed, lowercased, full/half width). */
+const APPROVAL_REPLIES: Readonly<Record<string, 'allowed-once' | 'rejected'>> = {
+  批准: 'allowed-once',
+  同意: 'allowed-once',
+  允许: 'allowed-once',
+  ok: 'allowed-once',
+  yes: 'allowed-once',
+  y: 'allowed-once',
+  拒绝: 'rejected',
+  不批准: 'rejected',
+  不同意: 'rejected',
+  no: 'rejected',
+  n: 'rejected',
+}
+
+/** Normalize one reply word: trim, lowercase, fold full-width latin. */
+function normalizeReply(text: string): string {
+  return text
+    .trim()
+    .replace(/[\uFF01-\uFF5E]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0))
+    .replace(/\s+/g, '')
+    .toLowerCase()
+}
+
+/** Strip the epoch suffix (`~gN`) from a WeCom session id. */
+function stripEpoch(id: string): string {
+  return id.replace(/~g\d+$/, '')
+}
+
+/** Structural face of the harness approval request (agent, tool, signal). */
+interface ApprovalRequestLike {
+  agent: { session: { id: unknown; events: unknown } }
+  toolName: string
+  reason?: string
+  signal?: {
+    aborted?: boolean
+    addEventListener?: (type: string, fn: () => void, options?: { once?: boolean }) => void
+  }
+}
+
+type ApprovalOutcomeLike = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
+
 /**
  * One Harness agent per WeCom conversation: opened on first use, resumed from
  * persistence after restarts, and closed with the plugin. Each agent mounts a
@@ -130,12 +361,21 @@ export class AgentPool {
   private readonly deletedDirs = new Set<string>()
   /** Disposer for the deletion watcher interval, owned by this pool. */
   private watcherDisposer: (() => void) | undefined
+  /** In-chat approval bridge; answers WeCom-agent escalations from the chat. */
+  private readonly approvals: ApprovalBridge
+  /**
+   * Push callback handed to the approval bridge by the channel: delivers one
+   * proactive text into the chat that triggered the escalation. Assigned in
+   * `wireApprovals` before any turn can run.
+   */
+  private approvalPush: ((sessionId: string, text: string) => Promise<void>) | undefined
 
   constructor(
     private readonly ctx: Context,
     private readonly config: ResolvedConfig,
   ) {
     this.log = ctx.logger('dsh-wecom')
+    this.approvals = new ApprovalBridge(this.log, config)
     this.semaphore = new Semaphore(config.maxConcurrent)
     const provider = config.provider
     const model = config.model
@@ -192,6 +432,38 @@ export class AgentPool {
       }
     }
     this.startDeletionWatcher()
+    this.approvals.start(
+      this.ctx,
+      (sessionId) => this.ownsWeComSession(sessionId),
+      (sessionId, text) => this.approvalPush?.(sessionId, text) ?? Promise.resolve(),
+    )
+  }
+
+  /**
+   * Hand the channel its two approval seams: the proactive push (delivering
+   * the ask into the chat) and the reply interceptor (answering pending
+   * approvals from chat messages). Called by the channel before `start()`
+   * completes so no message can race the wiring.
+   */
+  wireApprovals(
+    push: (sessionId: string, text: string) => Promise<void>,
+  ): (message: BaseMessage) => 'allowed-once' | 'rejected' | undefined {
+    this.approvalPush = push
+    return (message) => this.approvals.reply(message, (m) => this.locate(m).id)
+  }
+
+  /**
+   * Whether one session id belongs to this pool: any epoch of a WeCom
+   * conversation this pool tracks (live agents and persisted ids both
+   * count — an escalation can fire on a just-resumed session).
+   */
+  private ownsWeComSession(sessionId: string): boolean {
+    if (sessionId.startsWith('dsh-wecom-') === false) return false
+    if (this.agents.has(sessionId)) return true
+    for (const id of this.persisted) {
+      if (id === sessionId || stripEpoch(id) === stripEpoch(sessionId)) return true
+    }
+    return false
   }
 
   /**
@@ -213,13 +485,13 @@ export class AgentPool {
     const baseline = new Set<string>()
     for (const workspace of listNow()) {
       const path = workspace.path
-      if (path !== undefined && path.startsWith(this.config.cwd)) baseline.add(path)
+      if (path?.startsWith(this.config.cwd)) baseline.add(path)
     }
     const timer = setInterval(() => {
       const current = new Set<string>()
       for (const workspace of listNow()) {
         const path = workspace.path
-        if (path !== undefined && path.startsWith(this.config.cwd)) current.add(path)
+        if (path?.startsWith(this.config.cwd)) current.add(path)
       }
       let changed = false
       for (const path of baseline) {
@@ -609,6 +881,7 @@ export class AgentPool {
   /** Tear down every agent once queued turns have settled. */
   async dispose(): Promise<void> {
     this.watcherDisposer?.()
+    this.approvals.dispose()
     await Promise.allSettled(this.chains.values())
     await Promise.allSettled([...this.agents.values()].map((handle) => handle.dispose()))
     this.agents.clear()

@@ -1,6 +1,6 @@
 {
   "name": "dsh-wecom",
-  "version": "0.1.28",
+  "version": "0.1.29",
   "description": "dsh-wecom: a WeCom AI Bot channel for DeepSeek Harness — each chat runs a persistent, preset-backed agent over the official long connection.",
   "author": "TtTRz <romc1224@gmail.com>",
   "type": "module",
@@ -100,6 +100,7 @@
     "@deepseek-ai/dsh-system-prompt": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-timeout": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-typert-protocol": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-user-approval": "0.1.0-rc.8",
     "@types/node": "^24.3.0",
     "@types/react": "~18.3.1",
     "react": "^18.2.0",
