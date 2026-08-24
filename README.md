@@ -103,6 +103,10 @@ Tune the mounted row in `~/.dsh/profiles/web/cordis.patch.yml`:
 | `showToolCalls` | `true` | Render a compact tool-call activity list inside the `<think>` card |
 | `maxConcurrent` | `4` | Global cap on concurrent turns |
 | `turnTimeoutMs` | `300000` | Per-turn timeout (cancels the turn) |
+| `approvalMode` | `chat` | In-chat sandbox-escalation approvals: `chat` answers from the chat (reply 批准/拒绝), `notify` only pushes the ask, `off` is fully silent (web UI decides) |
+| `approvalTimeoutMs` | `300000` | How long an in-chat approval waits before failing closed (`cancelled`) |
+| `approvalAllowlist` | `[]` | Userids allowed to answer in-chat approvals; empty admits every admitted sender |
+| `approvalHint` | `回复「批准」继续，回复「拒绝」取消。` | Reply-word hint appended to the pushed approval request |
 
 ## 💬 Commands
 

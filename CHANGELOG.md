@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.29] - 2026-08-24
+
+### Added
+
+- Sandbox-escalation approvals are now answerable inside WeCom chats
+  (`approvalMode: 'chat'`, the default): when a WeCom agent's tool retries
+  with wider permissions, the harness approval request is claimed by the new
+  `ApprovalBridge`, pushed into the chat that triggered it (tool name +
+  reason + reply hint), and resolved from the chat's next reply word
+  (批准/同意/允许/ok/yes to allow; 拒绝/不批准/不同意/no to reject). Unanswered
+  asks fail closed to `cancelled` after `approvalTimeoutMs` (default 5 min).
+  Reply words are intercepted before the normal message flow, so they answer
+  the waiting turn instead of queueing behind it. The bridge registers on the
+  approval waterfall with `prepend`, so the web-UI answerer never races it.
+- `approvalMode: 'notify'` pushes the ask into the chat but leaves the
+  decision to the web UI; `approvalMode: 'off'` restores the old silent
+  behavior entirely.
+- `approvalAllowlist` (userids) restricts who may answer an in-chat
+  approval; empty admits every sender the channel already admits. Foreign
+  chats' reply words never resolve another chat's pending approval.
+
 ## [0.1.28] - 2026-08-22
 
 ### Added

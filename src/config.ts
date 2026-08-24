@@ -47,6 +47,23 @@ export interface Config {
   /** Allowlist of group chatids (only checked when groupPolicy === 'allowlist'). */
   groupAllowlist: string[]
   greeting: string
+  /**
+   * In-chat sandbox-escalation approvals. `chat` answers every WeCom-agent
+   * approval inside the chat that triggered it (reply per the hint pushed with
+   * the request); `notify` only pushes the request and leaves the decision to
+   * the web UI; `off` behaves as before (silent, web UI decides).
+   */
+  approvalMode: 'chat' | 'notify' | 'off'
+  /** How long an in-chat approval waits for a reply before failing closed. */
+  approvalTimeoutMs: number
+  /**
+   * Senders allowed to answer an in-chat approval (single-chat userids or
+   * group sender userids). Empty means every sender the channel already
+   * admits may approve.
+   */
+  approvalAllowlist: string[]
+  /** Reply-word hint appended to the pushed approval request. */
+  approvalHint: string
   /** Persistent prompt section layered on the preset persona on every turn. */
   instructions: string
   /**
@@ -98,6 +115,23 @@ export const Config: z<Config> = z.object({
   groupPolicy: z.union(['open', 'allowlist', 'disabled']).default('open'),
   groupAllowlist: z.array(z.string()).default([]),
   greeting: z.string().default(''),
+  /**
+   * In-chat sandbox-escalation approvals. `chat` answers every WeCom-agent
+   * approval inside the chat that triggered it (reply per the hint pushed with
+   * the request); `notify` only pushes the request and leaves the decision to
+   * the web UI; `off` behaves as before (silent, web UI decides).
+   */
+  approvalMode: z.union(['chat', 'notify', 'off']).default('chat'),
+  /** How long an in-chat approval waits for a reply before failing closed. */
+  approvalTimeoutMs: z.number().step(1).min(10_000).max(1_209_600_000).default(300_000),
+  /**
+   * Senders allowed to answer an in-chat approval (single-chat userids or
+   * group sender userids). Empty means every sender the channel already
+   * admits may approve.
+   */
+  approvalAllowlist: z.array(z.string()).default([]),
+  /** Reply-word hint appended to the pushed approval request. */
+  approvalHint: z.string().default('回复「批准」继续，回复「拒绝」取消。'),
   instructions: z
     .string()
     .default(

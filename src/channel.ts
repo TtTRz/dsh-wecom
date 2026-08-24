@@ -33,6 +33,10 @@ export interface BotClient {
   on(event: 'event.disconnected_event', handler: () => void): this
   connect(): this
   disconnect(): void
+  sendMessage(
+    chatid: string,
+    body: { msgtype: 'markdown'; markdown: { content: string } },
+  ): Promise<unknown>
   replyStream(
     frame: WsFrameHeaders,
     streamId: string,
@@ -192,7 +196,19 @@ export class WecomChannel {
     this.log = ctx.logger('dsh-wecom')
     this.pool = new AgentPool(ctx, config)
     this.dedupe = new Dedupe(config.dedupeLimit)
+    // In-chat approval seam: the pool claims WeCom-agent escalations and
+    // pushes the ask into the chat; incoming reply words are intercepted
+    // BEFORE the normal message flow (the waiting turn must not queue the
+    // answer behind itself).
+    this.interceptApprovalReply = this.pool.wireApprovals(async (sessionId, text) => {
+      await this.pushToSession(sessionId, text)
+    })
   }
+
+  /** Reply interceptor installed by the pool in the constructor. */
+  private readonly interceptApprovalReply: (
+    message: BaseMessage,
+  ) => 'allowed-once' | 'rejected' | undefined
 
   /** Connect and authenticate before accepting any traffic. */
   async start(): Promise<void> {
@@ -350,6 +366,21 @@ export class WecomChannel {
   private async onMessage(frame: WsFrame<BaseMessage>): Promise<void> {
     const message = frame.body
     if (message === undefined || this.dedupe.seen(message.msgid) || !this.permits(message)) return
+
+    // Approval replies answer a pending escalation of THIS chat; they are
+    // consumed here and never reach the agent turn (which is still waiting
+    // on the escalation's approval request).
+    const outcome = this.interceptApprovalReply(message)
+    if (outcome !== undefined) {
+      const streamId = generateReqId('dsh')
+      await this.sendStream(
+        frame,
+        streamId,
+        outcome === 'allowed-once' ? '已批准，继续执行。' : '已拒绝，该操作不会执行。',
+        true,
+      )
+      return
+    }
 
     const command = commandOf(message)
     if (COMMANDS.has(command)) {
@@ -578,6 +609,33 @@ export class WecomChannel {
     }
     return this.client
   }
+
+  /**
+   * Proactively deliver one text into the chat owning a WeCom session id:
+   * the approval push path. The chat target is the pool's stored peer for
+   * the session's conversation (userid for single chats, chatid for
+   * groups), so the ask lands in the chat that triggered the escalation
+   * even though no inbound frame is at hand.
+   */
+  private async pushToSession(sessionId: string, text: string): Promise<void> {
+    const peer = this.pool.peerOf(stripEpochOf(sessionId))
+    if (peer === undefined) throw new Error(`dsh-wecom: no chat target known for ${sessionId}`)
+    await this.retry(async () =>
+      timeout(
+        this.liveClient().sendMessage(peer, {
+          msgtype: 'markdown',
+          markdown: { content: clipUtf8(text, this.config.replyLimitBytes) },
+        }),
+        this.config.sendTimeoutMs,
+        'WeCom approval push',
+      ),
+    )
+  }
+}
+
+/** Strip the epoch suffix (`~gN`) from a WeCom session id. */
+function stripEpochOf(id: string): string {
+  return id.replace(/~g\d+$/, '')
 }
 
 function commandOf(message: BaseMessage): string {

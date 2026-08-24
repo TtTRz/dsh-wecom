@@ -448,7 +448,7 @@ describe('AgentPool', () => {
     // Boot 2 (restart): the persisted session regroups, but the tombstoned
     // dir must NOT recreate its workspace row.
     {
-      const { ctx, created } = makeHarness()
+      const { ctx } = makeHarness()
       ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
         name === 'workspaceRegistry' ? makeRegistry() : undefined,
       )
