@@ -12,7 +12,7 @@ import {
 } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-presets'
-import type {} from '@deepseek-ai/dsh-attachment'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { type Session, type SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
@@ -43,6 +43,11 @@ export interface Reply {
   text: string
   reasoning?: string
   toolCalls?: ToolCallSummary[]
+  /**
+   * Durable image attachments produced during the turn (e.g. cards rendered by
+   * the `render_card` tool), oldest first. Channels attach them to the reply.
+   */
+  images?: ImageAttachmentRef[]
 }
 
 /** Structural face of a workspace entity (absent outside web profiles). */
@@ -1031,6 +1036,7 @@ export class AgentPool {
     const reasoning: string[] = []
     const pendingCalls = new Map<string, { name: string; arguments: string }>()
     const toolCalls: ToolCallSummary[] = []
+    const images: ImageAttachmentRef[] = []
     // Observe this agent's session firehose for the duration of the turn:
     // forward text deltas for streaming and collect reasoning + tool activity
     // for the optional final summary. Scoped to the agent, so we see only its
@@ -1057,6 +1063,14 @@ export class AgentPool {
           ok: event.data.error === undefined,
           error: event.data.error?.code,
         })
+        // Cards rendered by tools (e.g. render_card) arrive as image blocks in
+        // the tool-result content; collect their durable refs for the reply.
+        for (const block of event.data.message.content ?? []) {
+          if (block.type !== 'tool-result') continue
+          for (const inner of block.content) {
+            if (inner.type === 'image') images.push(inner.attachment)
+          }
+        }
       }
     })
     try {
@@ -1074,6 +1088,7 @@ export class AgentPool {
     const reply = this.extractText(agent.session.events.slice(start))
     if (reasoning.length > 0) reply.reasoning = reasoning.join('')
     if (toolCalls.length > 0) reply.toolCalls = toolCalls
+    if (images.length > 0) reply.images = images
     return reply
   }
 

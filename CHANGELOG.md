@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Rendered image cards can now be sent to the WeCom chat. When an agent turn
+  renders a card (e.g. the `render_card` tool), the pool collects the durable
+  image attachments from the tool-result events into `Reply.images`, and the
+  channel materializes them as image `msg_item` entries (base64 PNG + MD5) on
+  the final stream frame. The SDK allows `msg_item` only on `finish: true` and
+  at most 10 images; a card whose bytes cannot be read is logged and skipped.
+
 ## [0.1.29] - 2026-08-24
 
 ### Added

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { isAbsolute } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
@@ -7,6 +8,7 @@ import {
   type EventMessageWith,
   generateReqId,
   type Logger,
+  type ReplyMsgItem,
   WSAuthFailureError,
   WSClient,
   type WSClientOptions,
@@ -42,6 +44,7 @@ export interface BotClient {
     streamId: string,
     content: string,
     finish?: boolean,
+    msgItem?: readonly ReplyMsgItem[],
   ): Promise<unknown>
   replyWelcome(
     frame: WsFrameHeaders,
@@ -413,11 +416,15 @@ export class WecomChannel {
           : undefined,
       )
       await sink?.flush(false)
+      // Cards rendered during the turn ride the final stream frame as image
+      // msg_item entries (SDK: msg_item only on finish=true; max 10; 10MB each).
+      const msgItem = await this.replyImages(reply)
       await this.sendStream(
         frame,
         streamId,
         clipUtf8(this.renderReply(reply), this.config.replyLimitBytes),
         true,
+        msgItem,
       )
     } catch (error) {
       this.log.error('WeCom message %s failed: %s', message.msgid, String(error))
@@ -512,14 +519,41 @@ export class WecomChannel {
     streamId: string,
     content: string,
     finish: boolean,
+    msgItem?: readonly ReplyMsgItem[],
   ): Promise<void> {
     await this.retry(async () =>
       timeout(
-        this.liveClient().replyStream(frame, streamId, content, finish),
+        this.liveClient().replyStream(frame, streamId, content, finish, msgItem),
         this.config.sendTimeoutMs,
         'WeCom reply send',
       ),
     )
+  }
+
+  /**
+   * Materialize the reply's rendered cards into WeCom image msg_item entries.
+   * Each entry is base64 PNG + MD5, capped at 10 images (the SDK limit). A
+   * failure to read one card is logged and skipped — the text reply still
+   * goes out.
+   */
+  private async replyImages(reply: Reply): Promise<ReplyMsgItem[] | undefined> {
+    if (reply.images === undefined || reply.images.length === 0) return undefined
+    const items: ReplyMsgItem[] = []
+    for (const ref of reply.images.slice(0, 10)) {
+      try {
+        const stored = await this.ctx.attachments.readImage(ref)
+        items.push({
+          msgtype: 'image',
+          image: {
+            base64: Buffer.from(stored.data).toString('base64'),
+            md5: createHash('md5').update(stored.data).digest('hex'),
+          },
+        })
+      } catch (error) {
+        this.log.error('WeCom card image read failed: %s', String(error))
+      }
+    }
+    return items.length > 0 ? items : undefined
   }
 
   /**
