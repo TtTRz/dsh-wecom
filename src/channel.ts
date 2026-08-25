@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto'
 import { isAbsolute } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
@@ -49,6 +48,15 @@ export interface BotClient {
   replyWelcome(
     frame: WsFrameHeaders,
     body: { msgtype: 'text'; text: { content: string } },
+  ): Promise<unknown>
+  uploadMedia(
+    fileBuffer: Uint8Array,
+    options: { type: 'image'; filename: string },
+  ): Promise<{ media_id: string }>
+  sendMediaMessage(
+    chatid: string,
+    mediaType: 'image',
+    mediaId: string,
   ): Promise<unknown>
   downloadFile(url: string, aesKey?: string): Promise<{ buffer: Uint8Array; filename?: string }>
 }
@@ -420,12 +428,10 @@ export class WecomChannel {
           : undefined,
       )
       await sink?.flush(false)
-      // Cards rendered during the turn ride the final stream frame as image
-      // msg_item entries (SDK: msg_item only on finish=true; max 10; 10MB each).
-      const msgItem = await this.replyImages(reply)
       const finalText = clipUtf8(this.renderReply(reply), this.config.replyLimitBytes)
       try {
-        await this.sendStream(frame, streamId, finalText, true, msgItem)
+        await this.sendStream(frame, streamId, finalText, true)
+        await this.sendCardsAsImages(message, reply)
       } catch (streamError) {
         // The passive stream can die mid-turn (stream window expired — the
         // server answers a non-zero errcode such as 846608 — or the stream was
@@ -550,29 +556,39 @@ export class WecomChannel {
   }
 
   /**
-   * Materialize the reply's rendered cards into WeCom image msg_item entries.
-   * Each entry is base64 PNG + MD5, capped at 10 images (the SDK limit). A
-   * failure to read one card is logged and skipped — the text reply still
-   * goes out.
+   * Ship the turn's rendered cards as dedicated image messages through the
+   * PROACTIVE channel (aibot_send_msg, msgtype=image + media_id), which is the
+   * documented WeCom image path. The passive stream reply (aibot_respond_msg)
+   * does NOT support msg_item, so images cannot ride the stream. Each card is
+   * uploaded to the media library for a temporary media_id, then pushed to the
+   * chat; failures are logged and skipped while the text reply still goes out.
    */
-  private async replyImages(reply: Reply): Promise<ReplyMsgItem[] | undefined> {
-    if (reply.images === undefined || reply.images.length === 0) return undefined
-    const items: ReplyMsgItem[] = []
+  private async sendCardsAsImages(message: BaseMessage, reply: Reply): Promise<void> {
+    if (reply.images === undefined || reply.images.length === 0) return
+    const peer = replyTarget(message)
     for (const ref of reply.images.slice(0, 10)) {
       try {
         const stored = await this.ctx.attachments.readImage(ref)
-        items.push({
-          msgtype: 'image',
-          image: {
-            base64: Buffer.from(stored.data).toString('base64'),
-            md5: createHash('md5').update(stored.data).digest('hex'),
-          },
+        // `readImage` returns a plain Uint8Array, but the SDK's uploadMedia
+        // expects a Node Buffer and does `chunk.toString('base64')` — on a
+        // Uint8Array that is NOT base64 (it yields "[object Uint8Array]"),
+        // which WeCom rejects with `40006 invalid file size`. Wrap first.
+        const uploaded = await this.liveClient().uploadMedia(Buffer.from(stored.data), {
+          type: 'image',
+          filename: `card-${Date.now()}.png`,
         })
+        if (uploaded.media_id === undefined || uploaded.media_id.length === 0) continue
+        await this.retry(async () =>
+          timeout(
+            this.liveClient().sendMediaMessage(peer, 'image', uploaded.media_id!),
+            this.config.sendTimeoutMs,
+            'WeCom image push send',
+          ),
+        )
       } catch (error) {
-        this.log.error('WeCom card image read failed: %s', String(error))
+        this.log.error('WeCom card image send failed: %s', String(error))
       }
     }
-    return items.length > 0 ? items : undefined
   }
 
   /**
