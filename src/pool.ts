@@ -1068,7 +1068,9 @@ export class AgentPool {
         for (const block of event.data.message.content ?? []) {
           if (block.type !== 'tool-result') continue
           for (const inner of block.content) {
-            if (inner.type === 'image') images.push(inner.attachment)
+            if (inner.type === 'image') {
+              images.push(inner.attachment)
+            }
           }
         }
       }

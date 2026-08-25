@@ -22,6 +22,8 @@ function makeClient() {
     replyStream: vi.fn(async () => undefined),
     sendMessage: vi.fn(async () => undefined),
     replyWelcome: vi.fn(async () => undefined),
+    uploadMedia: vi.fn(async () => ({ media_id: 'media-1', created_at: String(Date.now()) })),
+    sendMediaMessage: vi.fn(async () => undefined),
     downloadFile: vi.fn(async () => ({ buffer: new Uint8Array() })),
   }
   const botClient = client as unknown as BotClient
@@ -197,6 +199,7 @@ describe('WecomChannel streaming', () => {
       attachments: {
         imageLimits: { maxImagesPerMessage: 4, maxMessageImageBytes: 10_000 },
         saveImage: vi.fn(),
+        readImage: vi.fn(async () => ({ ref: {}, data: new Uint8Array([1, 2, 3]) })),
       },
       llm: { resolveModelInfo: vi.fn(async () => ({ inputModalities: ['text'] })) },
       agentPresets: {
@@ -425,6 +428,60 @@ describe('WecomChannel streaming', () => {
     expect(sendCalls).toHaveLength(1)
     expect(sendCalls[0]?.[0]).toBe('u1')
     expect(String(sendCalls[0]?.[1]?.markdown?.content)).toContain('Final answer')
+  })
+
+  it('sends rendered cards as uploaded media via the proactive channel, not stream msg_item', async () => {
+    // A turn that produces an image block (card) must ship it through
+    // uploadMedia → sendMediaMessage(media_id) on the PROACTIVE channel
+    // (aibot_send_msg), NOT as a stream msg_item (which the WeCom doc says is
+    // unsupported).
+    const { client, fire } = makeClient()
+    const stream = [
+      {
+        type: 'assistant/chunk',
+        data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: '结论' } },
+      },
+      {
+        type: 'tool/call',
+        data: { turn: 1, step: 1, callId: 'c1', name: 'render_card', arguments: '{}' },
+      },
+      {
+        type: 'tool/result',
+        data: {
+          turn: 1,
+          step: 1,
+          message: {
+            source: { kind: 'tool', callId: 'c1' },
+            content: [
+              {
+                type: 'tool-result',
+                content: [{ type: 'image', attachment: { attachmentId: 'img-1', mediaType: 'image/png', bytes: 3, width: 1080, height: 800 } }],
+              },
+            ],
+          },
+        },
+      },
+    ]
+    const channel = new WecomChannel(
+      makeStreamingSetup(stream, '结论') as never,
+      testConfig({ streamFlushMs: 5_000 }),
+      () => client,
+    )
+    await channel.start()
+    await sendText(fire, 'hi', 'm1')
+
+    const media = client as unknown as { uploadMedia: ReturnType<typeof vi.fn>; sendMediaMessage: ReturnType<typeof vi.fn> }
+    // One upload (to get media_id) and one sendMediaMessage per rendered card.
+    expect(media.uploadMedia).toHaveBeenCalled()
+    expect(media.sendMediaMessage).toHaveBeenCalled()
+    // The upload targets an image; the push targets the media_id from the stub.
+    const uploadCalls = media.uploadMedia.mock.calls
+    expect(uploadCalls[0]?.[1]).toMatchObject({ type: 'image' })
+    const sendCalls = media.sendMediaMessage.mock.calls
+    expect(sendCalls[0]?.[1]).toBe('image')
+    expect(sendCalls[0]?.[2]).toBe('media-1')
+    // Target is the single-chat userid from the inbound message.
+    expect(sendCalls[0]?.[0]).toBe('u1')
   })
 })
 

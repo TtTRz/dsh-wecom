@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-25
+
+### Fixed
+
+- Rendered image cards now actually reach the WeCom chat. The upload path was
+  silently broken: `attachments.readImage()` returns a plain `Uint8Array`, but
+  the SDK's `uploadMedia(fileBuffer)` expects a Node `Buffer` and encodes each
+  chunk with `chunk.toString('base64')` — on a `Uint8Array` that call does NOT
+  produce base64 (it yields `"[object Uint8Array]"`), so WeCom reassembled
+  garbage bytes, never matched the declared `total_size`, and rejected every
+  upload with `40006 invalid file size`. Cards are now wrapped with
+  `Buffer.from()` before uploading. Verified end-to-end: cards arrive as image
+  messages on the proactive channel (`aibot_send_msg` + media_id).
+
+### Changed
+
+- Card delivery no longer uses stream `msg_item` at all: the WeCom
+  long-connection document states the passive stream reply does not support
+  `msg_item`, and inlined base64 images were blocked by the platform
+  content-security gate ("未通过安全检查的图片内容"). The answer text rides the
+  stream; each card is uploaded to the media library and pushed as a dedicated
+  `msgtype: image` message on the proactive channel — the documented image
+  path.
+
 ## [0.2.1] - 2026-08-24
 
 ### Fixed
