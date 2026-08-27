@@ -197,6 +197,10 @@ interface BotView {
   credentialName: string
   botIdExpr: string
   isDefault: boolean
+  /** Whether a channel service for this namespace is live in the process. */
+  live?: boolean
+  connected?: boolean
+  conversations?: number
 }
 
 interface BotsView {
@@ -600,7 +604,7 @@ export function apply(ctx: {
       try {
         const method = isEdit ? 'PUT' : 'POST'
         const body = isEdit
-          ? { id: props.bot?.id, preset, workspaceTitle: name }
+          ? { id: props.bot?.id, preset, workspaceTitle: name, namespace }
           : { namespace, name, preset }
         const res = await fetch('/api/wecom/bots', {
           method,
@@ -726,22 +730,21 @@ export function apply(ctx: {
           'div',
           null,
           fieldLabel('namespace（唯一标识，小写字母/数字/-）'),
+          input(namespace, setNamespace, '例如：support'),
           isEdit
             ? React.createElement(
                 'div',
                 {
                   style: {
-                    fontSize: '13px',
+                    marginTop: '4px',
+                    fontSize: '11px',
                     color: v.labelTertiary,
-                    padding: '7px 10px',
-                    background: v.bgLayer1,
-                    border: `1px solid ${v.borderL1}`,
-                    borderRadius: '6px',
+                    lineHeight: 1.5,
                   },
                 },
-                namespace,
+                '改 namespace 会重排会话 id / 路由 / 状态文件，已有会话将不再归属此 bot，需重启生效。',
               )
-            : input(namespace, setNamespace, '例如：support'),
+            : null,
         ),
         React.createElement(
           'div',
@@ -843,6 +846,15 @@ export function apply(ctx: {
       onChanged: () => void
     },
   ): React.ReactNode {
+    const live = bot.live === true
+    const connected = live && bot.connected === true
+    const statusText = connected ? '已连接' : live ? '未连接' : '未挂载'
+    const statusColor = connected ? v.ok : live ? v.labelSecondary : v.labelTertiary
+    const dotColor = connected
+      ? v.ok
+      : live
+        ? 'var(--dsw-alias-state-warn-primary, #ff7d00)'
+        : v.labelTertiary
     return React.createElement(
       'div',
       {
@@ -858,11 +870,15 @@ export function apply(ctx: {
           boxShadow: '0 1px 2px rgba(0,0,0,.04)',
         },
       },
+      // ── Row 1: status dot + name + pill + actions (all inline, compact) ──
       React.createElement(
         'div',
-        {
-          style: { display: 'flex', alignItems: 'center', gap: '10px', padding: '14px 16px 10px' },
-        },
+        { style: { display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 14px' } },
+        React.createElement('span', {
+          className: 'wecom-dot',
+          style: { background: dotColor, width: '8px', height: '8px' },
+          title: statusText,
+        }),
         React.createElement(
           'span',
           {
@@ -880,6 +896,11 @@ export function apply(ctx: {
           },
           bot.workspaceTitle,
         ),
+        React.createElement(
+          'span',
+          { style: { flex: 'none', fontSize: '11px', color: statusColor, whiteSpace: 'nowrap' } },
+          statusText,
+        ),
         bot.isDefault
           ? React.createElement(
               'span',
@@ -892,112 +913,87 @@ export function apply(ctx: {
                   border: '1px solid rgba(51,112,255,.3)',
                   borderRadius: '999px',
                   padding: '1px 8px',
+                  whiteSpace: 'nowrap',
                 },
               },
               '默认',
             )
           : null,
+        React.createElement(
+          'button',
+          {
+            type: 'button',
+            onClick: () => deps.setEditing(bot.id),
+            style: {
+              flex: 'none',
+              border: `1px solid ${v.borderL1}`,
+              background: 'transparent',
+              color: v.labelPrimary,
+              borderRadius: '6px',
+              padding: '3px 10px',
+              cursor: 'pointer',
+              fontSize: '12px',
+            },
+          },
+          '编辑',
+        ),
+        bot.isDefault
+          ? null
+          : React.createElement(
+              'button',
+              {
+                type: 'button',
+                disabled: deps.busy === bot.id,
+                onClick: () => deps.onDelete(bot.id),
+                style: {
+                  flex: 'none',
+                  border: `1px solid ${v.borderL1}`,
+                  background: 'transparent',
+                  color: v.labelError,
+                  borderRadius: '6px',
+                  padding: '3px 10px',
+                  cursor: 'pointer',
+                  fontSize: '12px',
+                },
+              },
+              deps.busy === bot.id ? '删除中…' : '删除',
+            ),
       ),
+      // ── Row 2: preset + conversations + id (single compact line) ──
       React.createElement(
         'div',
         {
           style: {
-            padding: '12px 16px',
-            borderTop: `1px solid ${v.borderL1}`,
+            padding: '0 14px 10px',
+            fontSize: '12px',
+            color: v.labelTertiary,
             display: 'flex',
-            flexDirection: 'column',
-            gap: '8px',
-            background: v.bgLayer1,
+            alignItems: 'center',
+            gap: '6px',
+            minWidth: 0,
+            overflow: 'hidden',
+            whiteSpace: 'nowrap',
+            textOverflow: 'ellipsis',
           },
         },
         React.createElement(
-          'div',
-          { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
-          React.createElement(
-            'span',
-            {
-              style: {
-                flex: 'none',
-                fontSize: '11px',
-                color: v.labelTertiary,
-                background: v.bgLayer2,
-                border: `1px solid ${v.borderL1}`,
-                borderRadius: '4px',
-                padding: '1px 6px',
-              },
-            },
-            'preset',
-          ),
-          React.createElement(
-            'span',
-            {
-              style: {
-                fontWeight: 600,
-                color: v.labelPrimary,
-                minWidth: 0,
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-                fontSize: '13px',
-              },
-            },
-            bot.preset,
-          ),
-        ),
-        React.createElement(
-          'div',
-          { style: { fontSize: '12px', color: v.labelTertiary, wordBreak: 'break-all' } },
-          `id: ${bot.id} · namespace: ${bot.namespace} · credential: ${bot.credentialName}`,
-        ),
-        React.createElement(
-          'div',
+          'span',
           {
             style: {
-              display: 'flex',
-              justifyContent: 'flex-end',
-              gap: '8px',
-              borderTop: `1px solid ${v.borderL1}`,
-              paddingTop: '10px',
-              marginTop: '2px',
+              flex: 'none',
+              fontWeight: 600,
+              color: v.labelSecondary,
             },
           },
-          React.createElement(
-            'button',
-            {
-              type: 'button',
-              onClick: () => deps.setEditing(bot.id),
-              style: {
-                border: `1px solid ${v.borderL1}`,
-                background: 'transparent',
-                color: v.labelPrimary,
-                borderRadius: '6px',
-                padding: '5px 12px',
-                cursor: 'pointer',
-                fontSize: '12px',
-              },
-            },
-            '编辑',
-          ),
-          bot.isDefault
-            ? null
-            : React.createElement(
-                'button',
-                {
-                  type: 'button',
-                  disabled: deps.busy === bot.id,
-                  onClick: () => deps.onDelete(bot.id),
-                  style: {
-                    border: `1px solid ${v.borderL1}`,
-                    background: 'transparent',
-                    color: v.labelError,
-                    borderRadius: '6px',
-                    padding: '5px 12px',
-                    cursor: 'pointer',
-                    fontSize: '12px',
-                  },
-                },
-                deps.busy === bot.id ? '删除中…' : '删除',
-              ),
+          `preset: ${bot.preset}`,
+        ),
+        React.createElement('span', null, '·'),
+        React.createElement('span', null, `${bot.conversations ?? 0} 会话`),
+        React.createElement('span', null, '·'),
+        React.createElement(
+          'span',
+          { style: { overflow: 'hidden', textOverflow: 'ellipsis' } },
+          bot.id,
         ),
       ),
     )

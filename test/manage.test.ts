@@ -91,3 +91,17 @@ describe('manage bot rows', () => {
     expect(() => editBot(FIXTURE, 'a2a', { preset: 'code' })).toThrow(/no bot row/)
   })
 })
+
+describe('editBot namespace', () => {
+  it('changes the namespace field in place', () => {
+    const next = editBot(FIXTURE, 'wecom-channel', { namespace: 'lab' })
+    expect(next).toContain('namespace: lab')
+    expect(next).toContain('botId: !!js process.env.WECOM_BOT_ID')
+  })
+
+  it('rejects a namespace that would break routes', () => {
+    expect(() => editBot(FIXTURE, 'wecom-channel', { namespace: 'Bad/ns' })).toThrow(
+      /namespace must match/,
+    )
+  })
+})

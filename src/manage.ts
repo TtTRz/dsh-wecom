@@ -4,6 +4,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { sanitizeNamespace } from './config.js'
+import { channelStatusServiceName } from './status.js'
 
 /**
  * WeCom-bot manager. Reads the deployment's `cordis.patch.yml` and hands the
@@ -26,6 +27,12 @@ export interface BotSpec {
   botIdExpr: string
   /** Whether this is the `default` namespace row (carries the aggregate list). */
   isDefault: boolean
+  /** Whether a channel service for this namespace is live in the process. */
+  live?: boolean
+  /** Live connection state of the row, when a channel is mounted. */
+  connected?: boolean
+  /** Live conversation count of the row, when a channel is mounted. */
+  conversations?: number
 }
 
 export const DEFAULT_PATCH_PATH = join(homedir(), '.dsh', 'profiles', 'web', 'cordis.patch.yml')
@@ -115,11 +122,11 @@ function setField(
   return true
 }
 
-/** Apply preset / workspaceTitle edits to one wecom row; returns a new document. */
+/** Apply preset / workspaceTitle / namespace edits to one wecom row. */
 export function editBot(
   text: string,
   id: string,
-  patch: { preset?: string; workspaceTitle?: string },
+  patch: { preset?: string; workspaceTitle?: string; namespace?: string },
 ): string {
   const lines = text.split('\n')
   for (const row of findRows(lines)) {
@@ -127,6 +134,8 @@ export function editBot(
     if (patch.preset !== undefined) setField(lines, row.start, row.end, 'preset', patch.preset)
     if (patch.workspaceTitle !== undefined)
       setField(lines, row.start, row.end, 'workspaceTitle', patch.workspaceTitle)
+    if (patch.namespace !== undefined)
+      setField(lines, row.start, row.end, 'namespace', sanitizeNamespace(patch.namespace))
     return lines.join('\n')
   }
   throw new Error(`dsh-wecom: no bot row with id ${JSON.stringify(id)}`)
@@ -214,12 +223,25 @@ export function registerManageRoutes(ctx: Context, patchPath: string): () => voi
     const rows = await list
     return rows.map((r) => r.id)
   }
+  /** Enrich each patch-derived bot with its live channel state (when mounted). */
+  const enrich = (bot: BotSpec): BotSpec => {
+    try {
+      const svc = ctx.get(channelStatusServiceName(bot.namespace)) as
+        | { snapshot?: () => { connected: boolean; conversations: number } }
+        | undefined
+      const snap = svc?.snapshot?.()
+      if (snap === undefined) return bot
+      return { ...bot, live: true, connected: snap.connected, conversations: snap.conversations }
+    } catch {
+      return bot
+    }
+  }
   const respondList = async (res: ServerResponse): Promise<void> => {
     try {
       send(res, 200, {
         path: patchPath,
         presets: await presets(),
-        bots: listBots(read()),
+        bots: listBots(read()).map(enrich),
       })
     } catch (error) {
       send(res, 500, { available: false, error: String(error) })
@@ -240,11 +262,21 @@ export function registerManageRoutes(ctx: Context, patchPath: string): () => voi
             id?: string
             preset?: string
             workspaceTitle?: string
+            namespace?: string
           }
           if (body.id === undefined) throw new Error('missing id')
+          // Editing the namespace re-keys session ids, the route base, the
+          // state file, and the service name — only reject when it would
+          // collide with an existing row.
+          if (body.namespace !== undefined) {
+            const wanted = sanitizeNamespace(body.namespace)
+            const clash = listBots(read()).some((b) => b.id !== body.id && b.namespace === wanted)
+            if (clash) throw new Error(`namespace ${JSON.stringify(wanted)} is already taken`)
+          }
           const next = editBot(read(), body.id, {
             ...(body.preset === undefined ? {} : { preset: body.preset }),
             ...(body.workspaceTitle === undefined ? {} : { workspaceTitle: body.workspaceTitle }),
+            ...(body.namespace === undefined ? {} : { namespace: body.namespace }),
           })
           writeFileSync(patchPath, next, 'utf8')
           await respondList(res)
