@@ -906,9 +906,15 @@ export class AgentPool {
     return id.replace(/~g\d+$/, '')
   }
 
-  /** Where the durable per-conversation state lives (one hidden file in the agent cwd). */
+  /**
+   * Where the durable per-conversation state lives (one hidden file in the
+   * agent cwd). The `default` namespace keeps its legacy filename; every other
+   * namespace (multi-bot rows) gets a suffixed file so two pools sharing a cwd
+   * never overwrite each other's epochs/peers/tombstones.
+   */
   private epochStateFile(): string {
-    return join(this.config.cwd, '.dsh-wecom-state.json')
+    const suffix = this.config.namespace === 'default' ? '' : `.${this.config.namespace}`
+    return join(this.config.cwd, `.dsh-wecom-state${suffix}.json`)
   }
 
   /**

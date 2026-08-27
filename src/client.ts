@@ -25,11 +25,24 @@ interface TimerService {
   interval(callback: () => void, delay: number): () => void
 }
 
-/** Wire shape of `GET /api/wecom/status` (unknown when the host is down). */
+/** One sibling bot aggregated into the default row's status payload. */
+interface InstanceView {
+  id: string
+  available: boolean
+  connected?: boolean
+  conversations?: number
+  lastError?: string | null
+}
+
+/** Wire shape of `GET <base>/status` (unknown when the host is down). */
 interface StatusView {
   available?: boolean
   connected?: boolean
   stopping?: boolean
+  /** Namespace of the row that answered (`default` on the legacy route). */
+  namespace?: string
+  /** Sibling bots aggregated by the default row (panel switcher data). */
+  instances?: InstanceView[]
   conversations?: number
   authenticatedAgoMs?: number | null
   lastError?: string | null
@@ -101,11 +114,19 @@ const CSS = [
   '.wecom-agent-row{display:flex;align-items:center;gap:8px;margin:6px 0}',
   '.wecom-agent-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
   '.wecom-agent-model{color:var(--dsw-alias-label-secondary);font-size:12px}',
+  '.wecom-bots{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 2px}',
+  '.wecom-bot-chip{display:flex;align-items:center;gap:5px;cursor:pointer;background:transparent;border:1px solid var(--dsw-alias-border-l1);color:var(--dsw-alias-label-secondary);border-radius:999px;padding:2px 9px;font-size:12px;line-height:16px}',
+  '.wecom-bot-chip:hover{color:var(--dsw-alias-label-primary)}',
+  '.wecom-bot-chip[data-active="true"]{background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-border-l2,var(--dsw-alias-border-l1))}',
 ].join('')
 
 interface Store {
   open: boolean
   status: StatusView | null
+  /** Sibling bot list from the primary payload; empty when single-bot. */
+  bots: InstanceView[]
+  /** Selected sibling namespace, or null for the primary (default) row. */
+  selected: string | null
 }
 
 export const inject = ['slots', 'timer']
@@ -127,7 +148,7 @@ export function apply(ctx: {
     return () => element.remove()
   }, 'dsh-wecom.client-style')
 
-  const store: Store = { open: false, status: null }
+  const store: Store = { open: false, status: null, bots: [], selected: null }
   const listeners: Array<() => void> = []
   const emit = (): void => {
     for (const listener of [...listeners]) listener()
@@ -139,6 +160,11 @@ export function apply(ctx: {
   }
   const setStatus = (value: StatusView): void => {
     store.status = value
+    emit()
+  }
+  const selectBot = (id: string | null): void => {
+    if (store.selected === id) return
+    store.selected = id
     emit()
   }
   const subscribe = (listener: () => void): (() => void) => {
@@ -153,13 +179,30 @@ export function apply(ctx: {
     React.useEffect(() => subscribe(() => force((value) => value + 1)), [])
   }
 
+  /** Status base of the row being viewed: legacy path for the primary row. */
+  const viewBase = (): string =>
+    store.selected === null ? '/api/wecom' : `/api/wecom-${store.selected}`
+
   const poll = async (): Promise<void> => {
+    // The primary endpoint always refreshes first: it carries the bot list.
     try {
       const response = await fetch('/api/wecom/status')
       if (!response.ok) throw new Error(`status ${response.status}`)
-      setStatus((await response.json()) as StatusView)
+      const data = (await response.json()) as StatusView
+      store.bots = data.instances ?? []
+      if (store.selected === null) setStatus(data)
     } catch {
-      setStatus({ available: false })
+      if (store.selected === null) setStatus({ available: false })
+    }
+    // Then the selected sibling's own payload (same wire shape, own route).
+    if (store.selected !== null) {
+      try {
+        const response = await fetch(`${viewBase()}/status`)
+        if (!response.ok) throw new Error(`status ${response.status}`)
+        setStatus((await response.json()) as StatusView)
+      } catch {
+        setStatus({ available: false })
+      }
     }
   }
 
@@ -212,7 +255,7 @@ export function apply(ctx: {
     const restart = async (): Promise<void> => {
       setRestarting(true)
       try {
-        await fetch('/api/wecom/restart', { method: 'POST' })
+        await fetch(`${viewBase()}/restart`, { method: 'POST' })
       } catch {
         // status endpoint poll below surfaces the outcome
       }
@@ -299,7 +342,11 @@ export function apply(ctx: {
       React.createElement(
         'div',
         { className: 'wecom-panel-head' },
-        React.createElement('span', null, 'WeCom Bot'),
+        React.createElement(
+          'span',
+          null,
+          store.selected === null ? 'WeCom Bot' : `WeCom Bot · ${store.selected}`,
+        ),
         React.createElement(
           'button',
           {
@@ -311,6 +358,63 @@ export function apply(ctx: {
           '×',
         ),
       ),
+      // Bot switcher: one chip per aggregated row; the primary chip is always
+      // present once any sibling exists.
+      store.bots.length > 0
+        ? React.createElement(
+            'div',
+            { className: 'wecom-bots' },
+            React.createElement(
+              'button',
+              {
+                type: 'button',
+                className: 'wecom-bot-chip',
+                'data-active': store.selected === null ? 'true' : 'false',
+                onClick: () => selectBot(null),
+              },
+              React.createElement('span', {
+                className: 'wecom-dot',
+                style: {
+                  background:
+                    status.available === true && status.connected === true
+                      ? 'var(--dsw-alias-state-success-primary)'
+                      : status.available === true
+                        ? 'var(--dsw-alias-state-warn-primary)'
+                        : 'var(--dsw-alias-label-secondary)',
+                },
+              }),
+              'default',
+            ),
+            store.bots.map((bot) =>
+              React.createElement(
+                'button',
+                {
+                  key: bot.id,
+                  type: 'button',
+                  className: 'wecom-bot-chip',
+                  'data-active': store.selected === bot.id ? 'true' : 'false',
+                  title:
+                    bot.lastError !== undefined && bot.lastError !== null && bot.lastError !== ''
+                      ? bot.lastError
+                      : undefined,
+                  onClick: () => selectBot(bot.id),
+                },
+                React.createElement('span', {
+                  className: 'wecom-dot',
+                  style: {
+                    background:
+                      !bot.available || bot.connected === false
+                        ? 'var(--dsw-alias-label-secondary)'
+                        : bot.connected === true
+                          ? 'var(--dsw-alias-state-success-primary)'
+                          : 'var(--dsw-alias-state-warn-primary)',
+                  },
+                }),
+                bot.id,
+              ),
+            ),
+          )
+        : null,
       React.createElement(
         'div',
         { className: 'wecom-panel-row' },

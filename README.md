@@ -87,6 +87,31 @@ Tune the mounted row in `~/.dsh/profiles/web/cordis.patch.yml`:
     greeting: Hello, I am an assistant.
 ```
 
+### Multiple bots (one row per bot)
+
+One composition row = one WeCom bot. Mount the same plugin again with a distinct
+`namespace` to run a second bot — its own botId/credential, access policy, preset,
+and model route — in the same process:
+
+```yaml
+- id: wecom-channel-lab
+  name: dsh-wecom
+  config:
+    botId: !!js process.env.WECOM_BOT_ID_2
+    credentialName: WECOM_BOT_SECRET_2
+    namespace: lab          # keys session ids, routes, state file, service name
+    preset: code            # any preset this bot should speak with
+```
+
+Every non-default row gets its own `/api/wecom-<ns>/status` and
+`/api/wecom-<ns>/restart` routes and its own `.dsh-wecom-state.<ns>.json` state
+file; the default row keeps the legacy unprefixed paths. To surface secondary
+bots in the web panel's switcher, list their namespaces on the default row:
+
+```yaml
+    aggregateBots: [lab]    # default row only; panels show chips per bot
+```
+
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `cwd` | `~/.wecom-sessions` | Agent working directory: WeCom sessions, uploads (`.wecom-uploads/`), and `.dsh-wecom-state.json` live here; the sidebar workspace "WeCom" is claimed on it. `DSH_WECOM_CWD` overrides it. Must be absolute |

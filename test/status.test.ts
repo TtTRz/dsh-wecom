@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ChannelStatus } from '../src/channel.js'
 import {
+  channelStatusServiceName,
   processView,
   registerRestartRoute,
   registerStatusRoute,
@@ -312,5 +313,119 @@ describe('registerRestartRoute', () => {
     const dispose = registerRestartRoute(ctx as never, () => undefined)
     expect(typeof dispose).toBe('function')
     expect(() => dispose()).not.toThrow()
+  })
+})
+
+describe('multi-bot routes', () => {
+  it('keys the status service name per namespace', () => {
+    expect(channelStatusServiceName('default')).toBe('wecomChannelStatus')
+    expect(channelStatusServiceName('lab')).toBe('wecomChannelStatus.lab')
+  })
+
+  const makeCtx = () => {
+    const routes: Array<{
+      kind: string
+      path: string
+      handler: (req: unknown, res: unknown) => Promise<void> | void
+    }> = []
+    const ctx = {
+      get: vi.fn((name: string) => {
+        if (name === 'webServer') {
+          return {
+            register: (route: (typeof routes)[number]) => {
+              routes.push(route)
+              return () => undefined
+            },
+          }
+        }
+        if (name === 'agents') return { list: () => [] }
+        if (name === 'sessionPersistence') return { list: async () => [] }
+        if (name === 'wecomChannelStatus.lab') {
+          return {
+            snapshot: () => ({
+              connected: false,
+              stopping: false,
+              conversations: 1,
+              authenticatedAt: null,
+              lastError: 'kicked',
+            }),
+          }
+        }
+        return undefined
+      }),
+    }
+    return { ctx, routes }
+  }
+
+  const respond = async (route: {
+    handler: (req: unknown, res: unknown) => Promise<void> | void
+  }) => {
+    const res = {
+      statusCode: 0,
+      headers: {} as Record<string, string>,
+      body: '',
+      setHeader(name: string, value: string) {
+        this.headers[name] = value
+      },
+      end(body: string) {
+        this.body = body
+      },
+    }
+    await route.handler({}, res as never)
+    return res
+  }
+
+  it('mounts a non-default row on its namespaced base', async () => {
+    const { ctx, routes } = makeCtx()
+    registerStatusRoute(ctx as never, () => snapshot, undefined, { namespace: 'lab' })
+    expect(routes[0]?.path).toBe('/api/wecom-lab/status')
+    const parsed = JSON.parse(
+      (
+        await respond(
+          routes[0] as { handler: (req: unknown, res: unknown) => Promise<void> | void },
+        )
+      ).body,
+    )
+    expect(parsed.namespace).toBe('lab')
+  })
+
+  it('keeps the legacy paths and adds no instances by default', async () => {
+    const { ctx, routes } = makeCtx()
+    registerStatusRoute(ctx as never, () => snapshot)
+    expect(routes[0]?.path).toBe('/api/wecom/status')
+    const parsed = JSON.parse(
+      (
+        await respond(
+          routes[0] as { handler: (req: unknown, res: unknown) => Promise<void> | void },
+        )
+      ).body,
+    )
+    expect(parsed.namespace).toBe('default')
+    expect(parsed.instances).toBeUndefined()
+  })
+
+  it('aggregates configured siblings into the instances list', async () => {
+    const { ctx, routes } = makeCtx()
+    registerStatusRoute(ctx as never, () => snapshot, undefined, {
+      namespace: 'default',
+      aggregateBots: ['lab', 'ghost'],
+    })
+    const parsed = JSON.parse(
+      (
+        await respond(
+          routes[0] as { handler: (req: unknown, res: unknown) => Promise<void> | void },
+        )
+      ).body,
+    )
+    expect(parsed.instances).toEqual([
+      { id: 'lab', available: true, connected: false, conversations: 1, lastError: 'kicked' },
+      { id: 'ghost', available: false },
+    ])
+  })
+
+  it('mounts restart on the namespaced base too', () => {
+    const { ctx, routes } = makeCtx()
+    registerRestartRoute(ctx as never, () => undefined, 'lab')
+    expect(routes[0]?.path).toBe('/api/wecom-lab/restart')
   })
 })

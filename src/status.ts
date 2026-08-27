@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { freemem, loadavg, totalmem } from 'node:os'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ChannelStatus } from './channel.js'
+import { sanitizeNamespace, statusBaseOf } from './config.js'
 
 /** One live agent projected to the wire; scalars only, no live objects. */
 export interface AgentView {
@@ -73,6 +74,48 @@ function agentView(
   }
 }
 
+/** One sibling bot row aggregated into the default row's status payload. */
+export interface InstanceView {
+  /** The sibling's `namespace` (also its status base suffix). */
+  id: string
+  /** Whether the sibling service was reachable in the registry. */
+  available: boolean
+  connected?: boolean
+  conversations?: number
+  lastError?: string | null
+}
+
+/** Service name under which a channel row publishes its status snapshot. */
+export function channelStatusServiceName(namespace: string): string {
+  return namespace === 'default'
+    ? 'wecomChannelStatus'
+    : `wecomChannelStatus.${sanitizeNamespace(namespace)}`
+}
+
+/** Aggregate the configured sibling rows into scalar views; missing stay `available:false`. */
+function resolveInstances(ctx: Context, namespaces: readonly string[]): InstanceView[] {
+  return namespaces.map((id) => {
+    try {
+      const svc = ctx.get(channelStatusServiceName(id)) as
+        | { snapshot?: () => ChannelStatus }
+        | undefined
+      const snap = svc?.snapshot?.()
+      if (snap === undefined) return { id, available: false }
+      return {
+        id,
+        available: true,
+        connected: snap.connected,
+        conversations: snap.conversations,
+        lastError: snap.lastError,
+      }
+    } catch {
+      // The sibling has not activated (yet); surface it as unavailable instead
+      // of failing the whole payload.
+      return { id, available: false }
+    }
+  })
+}
+
 /** Process and machine load scalars. */
 export function processView(): ProcessView {
   return {
@@ -129,20 +172,26 @@ interface PersistenceLike {
 }
 
 /**
- * Serve `GET /api/wecom/status` for the browser UI: connection health, live
- * agents, process load, and session counts. Registering is optional: in
- * profiles without a web server this is a no-op disposer.
+ * Serve `GET <base>/status` for the browser UI: connection health, live
+ * agents, process load, and session counts. The route base follows the row's
+ * namespace (`/api/wecom` for the legacy default, `/api/wecom-<ns>` otherwise).
+ * A default row may additionally list sibling namespaces (`aggregateBots`),
+ * which adds an `instances` array powering the panel's bot switcher.
+ * Registering is optional: in profiles without a web server this is a no-op
+ * disposer.
  */
 export function registerStatusRoute(
   ctx: Context,
   snapshot: () => ChannelStatus,
   peerOf?: (sessionId: string) => string | undefined,
+  options: { namespace?: string; aggregateBots?: readonly string[] } = {},
 ): () => void {
+  const base = statusBaseOf(options.namespace ?? 'default')
   const webServer = ctx.get('webServer') as WebServerLike | undefined
   if (webServer === undefined) return () => undefined
   return webServer.register({
     kind: 'exact',
-    path: '/api/wecom/status',
+    path: `${base}/status`,
     handler: async (_req, res) => {
       const send = (status: number, body: unknown): void => {
         res.statusCode = status
@@ -155,7 +204,14 @@ export function registerStatusRoute(
         const persistence = ctx.get('sessionPersistence') as PersistenceLike | undefined
         const sessionIds =
           persistence === undefined ? [] : (await persistence.list()).map((h) => String(h.id))
-        send(200, statusPayload(snapshot(), agents, sessionIds, peerOf))
+        const payload = statusPayload(snapshot(), agents, sessionIds, peerOf)
+        send(200, {
+          ...payload,
+          namespace: options.namespace ?? 'default',
+          ...(options.aggregateBots && options.aggregateBots.length > 0
+            ? { instances: resolveInstances(ctx, options.aggregateBots) }
+            : {}),
+        })
       } catch (error) {
         send(500, { available: false, error: String(error) })
       }
@@ -164,18 +220,23 @@ export function registerStatusRoute(
 }
 
 /**
- * Serve `POST /api/wecom/restart` — force the long connection to reconnect
- * now (e.g. after credential rotation or a stuck socket). The `restart`
- * callback drops the current socket and wakes the owning reconnect loop;
- * it never shuts the bot down. Registering is optional: in profiles without
- * a web server this is a no-op disposer.
+ * Serve `POST <base>/restart` — force the named row's long connection to
+ * reconnect now (e.g. after credential rotation or a stuck socket). The
+ * `restart` callback drops the current socket and wakes the owning reconnect
+ * loop; it never shuts the bot down. Registering is optional: in profiles
+ * without a web server this is a no-op disposer.
  */
-export function registerRestartRoute(ctx: Context, restart: () => void): () => void {
+export function registerRestartRoute(
+  ctx: Context,
+  restart: () => void,
+  namespace = 'default',
+): () => void {
+  const base = statusBaseOf(namespace)
   const webServer = ctx.get('webServer') as WebServerLike | undefined
   if (webServer === undefined) return () => undefined
   return webServer.register({
     kind: 'exact',
-    path: '/api/wecom/restart',
+    path: `${base}/restart`,
     handler: (_req, res) => {
       const send = (status: number, body: unknown): void => {
         res.statusCode = status

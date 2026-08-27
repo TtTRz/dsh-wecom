@@ -22,6 +22,25 @@ export function resolveCwd(configured?: string): string {
   return cwd
 }
 
+/**
+ * Validate the per-row `namespace`: it keys the session-id digest, the status
+ * service name, and the HTTP route suffix, so only route-safe characters are
+ * accepted. `default` (the shared legacy value) is also accepted here.
+ */
+export function sanitizeNamespace(namespace: string): string {
+  if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(namespace)) {
+    throw new Error(
+      `dsh-wecom: namespace must match [a-z0-9][a-z0-9_-]{0,31}, got ${JSON.stringify(namespace)}`,
+    )
+  }
+  return namespace
+}
+
+/** Route/status base of one channel row: the default keeps its legacy paths. */
+export function statusBaseOf(namespace: string): string {
+  return namespace === 'default' ? '/api/wecom' : `/api/wecom-${sanitizeNamespace(namespace)}`
+}
+
 /** Runtime-validated plugin configuration as declared in a composition row. */
 export interface Config {
   botId: string
@@ -97,6 +116,13 @@ export interface Config {
   maxConcurrent: number
   /** Delay before the channel restarts after a dead or failed connection. */
   restartIntervalMs: number
+  /**
+   * Non-default namespaces this row aggregates into its status response as an
+   * `instances` list (the panel's bot switcher). Only the row mounted under
+   * the `default` namespace should list siblings; each listed sibling must be
+   * another dsh-wecom row with that namespace.
+   */
+  aggregateBots: string[]
 }
 
 /** Fully resolved runtime config: `cwd` is absolute and non-optional. */
@@ -159,4 +185,6 @@ export const Config: z<Config> = z.object({
   maxConcurrent: z.number().step(1).min(1).max(64).default(4),
   /** Delay before the channel restarts after a dead or failed connection. */
   restartIntervalMs: z.number().step(1).min(100).default(10_000),
+  /** Sibling namespaces aggregated into the default row's status payload. */
+  aggregateBots: z.array(z.string()).default([]),
 })

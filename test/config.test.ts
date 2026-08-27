@@ -1,7 +1,7 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { Config, resolveCwd } from '../src/config.js'
+import { Config, resolveCwd, sanitizeNamespace, statusBaseOf } from '../src/config.js'
 
 const ENV = 'DSH_WECOM_CWD'
 
@@ -61,5 +61,30 @@ describe('resolveCwd', () => {
   it('rejects a relative environment value', () => {
     process.env[ENV] = 'relative/path'
     expect(() => resolveCwd()).toThrow(/cwd must be absolute/)
+  })
+})
+
+describe('sanitizeNamespace', () => {
+  it('accepts route-safe names including the legacy default', () => {
+    expect(sanitizeNamespace('default')).toBe('default')
+    expect(sanitizeNamespace('lab')).toBe('lab')
+    expect(sanitizeNamespace('bot_2-a')).toBe('bot_2-a')
+  })
+
+  it('rejects names that would break routes or service keys', () => {
+    for (const bad of ['', '-lead', 'a/b', 'A', 'has space', 'x'.repeat(33)]) {
+      expect(() => sanitizeNamespace(bad)).toThrow(/namespace must match/)
+    }
+  })
+})
+
+describe('statusBaseOf', () => {
+  it('keeps the legacy base for the default namespace', () => {
+    expect(statusBaseOf('default')).toBe('/api/wecom')
+  })
+
+  it('suffixes other namespaces onto the base', () => {
+    expect(statusBaseOf('lab')).toBe('/api/wecom-lab')
+    expect(() => statusBaseOf('lab/x')).toThrow(/namespace must match/)
   })
 })
