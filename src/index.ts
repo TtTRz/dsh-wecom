@@ -8,8 +8,7 @@ import {
   statusBaseOf,
 } from './config.js'
 import { runChannelLoop } from './loop.js'
-import { DEFAULT_PATCH_PATH, registerManageRoutes } from './manage.js'
-import { channelStatusServiceName, registerRestartRoute, registerStatusRoute } from './status.js'
+import { channelStatusServiceName } from './status.js'
 
 export const name = 'dsh-wecom'
 export const inject = [
@@ -35,51 +34,27 @@ export {
 } from './media.js'
 export { containsImageMedia, toContentBlocks } from './message.js'
 export type { Reply, ToolCallSummary } from './pool.js'
-export {
-  registerRestartRoute,
-  registerStatusRoute,
-  type StatusPayload,
-  statusPayload,
-} from './status.js'
+export { channelStatusServiceName } from './status.js'
 export type { PluginConfig as ChannelConfig }
 export { Config, resolveCwd, sanitizeNamespace, statusBaseOf, WecomChannel }
 
-/** Mount the WeCom long connection and tie teardown to the Cordis lifecycle. */
+/**
+ * Mount one WeCom bot long connection and publish its status + reconnect seams
+ * under `wecomChannelStatus[.namespace]`. The web console (dsh-wecom-console)
+ * consumes those services to render the fleet panel and drive restarts — as of
+ * this version dsh-wecom no longer registers any /api/wecom route itself, so no
+ * single bot is a "primary" console host; every row is symmetric.
+ */
 export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
-  // Multi-bot support: every row is one bot. The namespace keys the status
-  // service name and the HTTP route base so several rows of this plugin can
-  // coexist in one process; the `default` namespace keeps its legacy names.
   const namespace = sanitizeNamespace(config.namespace)
   const resolved = { ...config, namespace, cwd: resolveCwd(config.cwd) }
   const channel = new WecomChannel(ctx, resolved)
-  // Published host-wide so dashboards and UI plugins can render live status
-  // without reaching into channel internals. Scoped to this plugin's fiber.
-  const status: ChannelStatusService = { snapshot: () => channel.snapshot() }
-  ctx.provide(channelStatusServiceName(namespace), status)
-  // Browser UI + dashboards: `GET <base>/status` (a no-op without a web server).
-  ctx.effect(
-    () =>
-      registerStatusRoute(
-        ctx,
-        () => channel.snapshot(),
-        (id) => channel.peerOf(id),
-        { namespace, ...(namespace === 'default' ? { aggregateBots: config.aggregateBots } : {}) },
-      ),
-    'dsh-wecom.status-route',
-  )
-  // Browser UI control: `POST <base>/restart` forces an immediate reconnect.
-  ctx.effect(
-    () => registerRestartRoute(ctx, () => channel.reconnect(), namespace),
-    'dsh-wecom.restart-route',
-  )
-  // WeCom-bot manager: list/edit/add/delete rows in the deployment patch. Only
-  // the `default` row mounts it — it is single-registration by design.
-  if (namespace === 'default') {
-    ctx.effect(
-      () => registerManageRoutes(ctx, config.patchPath ?? DEFAULT_PATCH_PATH),
-      'dsh-wecom.manage-routes',
-    )
+  // Expose both the health snapshot and the reconnect seam to the console.
+  const status: ChannelStatusService = {
+    snapshot: () => channel.snapshot(),
+    reconnect: () => channel.reconnect(),
   }
+  ctx.provide(channelStatusServiceName(namespace), status)
   await ctx.effect(async function* () {
     let stopped = false
     yield async () => {

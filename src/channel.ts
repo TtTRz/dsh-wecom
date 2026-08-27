@@ -53,11 +53,7 @@ export interface BotClient {
     fileBuffer: Uint8Array,
     options: { type: 'image'; filename: string },
   ): Promise<{ media_id: string }>
-  sendMediaMessage(
-    chatid: string,
-    mediaType: 'image',
-    mediaId: string,
-  ): Promise<unknown>
+  sendMediaMessage(chatid: string, mediaType: 'image', mediaId: string): Promise<unknown>
   downloadFile(url: string, aesKey?: string): Promise<{ buffer: Uint8Array; filename?: string }>
 }
 
@@ -80,6 +76,8 @@ export interface ChannelStatus {
 /** Status access consumed by dashboards and other UI surfaces. */
 export interface ChannelStatusService {
   snapshot(): ChannelStatus
+  /** Force the long connection to reconnect now (console restart control). */
+  reconnect?(): void
 }
 
 const COMMANDS = new Set(['/ping', '/help', '/status', '/stop', '/compact', '/new', '/clear'])
