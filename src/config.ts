@@ -123,6 +123,8 @@ export interface Config {
    * another dsh-wecom row with that namespace.
    */
   aggregateBots: string[]
+  /** Deployment patch the bot manager reads/writes (defaults to ~/.dsh/profiles/web/cordis.patch.yml). */
+  patchPath?: string
 }
 
 /** Fully resolved runtime config: `cwd` is absolute and non-optional. */
@@ -187,4 +189,6 @@ export const Config: z<Config> = z.object({
   restartIntervalMs: z.number().step(1).min(100).default(10_000),
   /** Sibling namespaces aggregated into the default row's status payload. */
   aggregateBots: z.array(z.string()).default([]),
+  /** Deployment patch the bot manager reads/writes; defaults to ~/.dsh/profiles/web/cordis.patch.yml. */
+  patchPath: z.string(),
 })

@@ -8,6 +8,7 @@ import {
   statusBaseOf,
 } from './config.js'
 import { runChannelLoop } from './loop.js'
+import { DEFAULT_PATCH_PATH, registerManageRoutes } from './manage.js'
 import { channelStatusServiceName, registerRestartRoute, registerStatusRoute } from './status.js'
 
 export const name = 'dsh-wecom'
@@ -25,6 +26,7 @@ export type { ChannelStatus, ChannelStatusService } from './channel.js'
 export type { ResolvedConfig } from './config.js'
 export { clipUtf8, conversationId, Dedupe, replyTarget, Semaphore, timeout } from './helpers.js'
 export { runChannelLoop } from './loop.js'
+export { addBot, DEFAULT_PATCH_PATH, editBot, listBots, removeBot } from './manage.js'
 export {
   detectImageMediaType,
   type MediaPort,
@@ -70,6 +72,14 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
     () => registerRestartRoute(ctx, () => channel.reconnect(), namespace),
     'dsh-wecom.restart-route',
   )
+  // WeCom-bot manager: list/edit/add/delete rows in the deployment patch. Only
+  // the `default` row mounts it — it is single-registration by design.
+  if (namespace === 'default') {
+    ctx.effect(
+      () => registerManageRoutes(ctx, config.patchPath ?? DEFAULT_PATCH_PATH),
+      'dsh-wecom.manage-routes',
+    )
+  }
   await ctx.effect(async function* () {
     let stopped = false
     yield async () => {
