@@ -112,6 +112,17 @@ bots in the web panel's switcher, list their namespaces on the default row:
     aggregateBots: [lab]    # default row only; panels show chips per bot
 ```
 
+### Bot manager (web UI)
+
+A `企微机器人` dock entry below the skill center opens a panel that lists every
+`dsh-wecom` row and edits per-bot **preset** and **workspace name** (the name
+that replaces the `WeCom` workspace-title prefix). It can also add and delete
+rows. It rewrites `cordis.patch.yml` surgically (comments and `!!js
+process.env.*` expressions are preserved), backed by `GET/PUT/POST/DELETE
+/api/wecom/bots` mounted on the `default` row only. Changes apply at the next
+dsh-web restart — the panel says so explicitly. Configure the patch path via
+`patchPath` (default `~/.dsh/profiles/web/cordis.patch.yml`).
+
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `cwd` | `~/.wecom-sessions` | Agent working directory: WeCom sessions, uploads (`.wecom-uploads/`), and `.dsh-wecom-state.json` live here; the sidebar workspace "WeCom" is claimed on it. `DSH_WECOM_CWD` overrides it. Must be absolute |
