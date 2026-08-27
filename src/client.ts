@@ -847,8 +847,12 @@ export function apply(ctx: {
     },
   ): React.ReactNode {
     const live = bot.live === true
+    // When the host hasn't been restarted to enrich the list (live ===
+    // undefined), avoid the misleading「未挂载」— stay neutral until real state
+    // arrives.
+    const statusKnown = bot.live !== undefined
     const connected = live && bot.connected === true
-    const statusText = connected ? '已连接' : live ? '未连接' : '未挂载'
+    const statusText = statusKnown ? (connected ? '已连接' : live ? '未连接' : '未挂载') : ''
     const statusColor = connected ? v.ok : live ? v.labelSecondary : v.labelTertiary
     const dotColor = connected
       ? v.ok
@@ -896,11 +900,15 @@ export function apply(ctx: {
           },
           bot.workspaceTitle,
         ),
-        React.createElement(
-          'span',
-          { style: { flex: 'none', fontSize: '11px', color: statusColor, whiteSpace: 'nowrap' } },
-          statusText,
-        ),
+        statusText !== ''
+          ? React.createElement(
+              'span',
+              {
+                style: { flex: 'none', fontSize: '11px', color: statusColor, whiteSpace: 'nowrap' },
+              },
+              statusText,
+            )
+          : null,
         bot.isDefault
           ? React.createElement(
               'span',
@@ -1000,6 +1008,10 @@ export function apply(ctx: {
   }
 
   function BotsManagerPanel(): React.ReactNode {
+    // The store subscription re-renders when botsData changes (the list), and
+    // the wm subscription re-renders when the panel opens/closes. Both are
+    // needed: without the store one the first open stays on「加载中」.
+    useStore()
     useLocalStore(wmSubscribe, wmIsActive)
     const [editing, setEditing] = React.useState<string | null>(null)
     const [creating, setCreating] = React.useState(false)
