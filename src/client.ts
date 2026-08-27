@@ -566,220 +566,438 @@ export function apply(ctx: {
       React.createElement('span', null, '企微机器人'),
     )
   }
+  // ── Bot manager: one card per bot (task-runner styling) ───────────────────
+  const v = {
+    labelPrimary: 'var(--dsw-alias-label-primary, #1f2329)',
+    labelSecondary: 'var(--dsw-alias-label-secondary, #646a73)',
+    labelTertiary: 'var(--dsw-alias-label-tertiary, #8f959e)',
+    labelError: 'var(--dsw-alias-label-error, #d83931)',
+    borderL1: 'var(--dsw-alias-border-l1, #dee0e3)',
+    borderL2: 'var(--dsw-alias-border-l2, #dee0e3)',
+    bgBase: 'var(--dsw-alias-bg-base, #ffffff)',
+    bgLayer1: 'var(--dsw-alias-bg-layer-1, #f7f8fa)',
+    bgLayer2: 'var(--dsw-alias-bg-layer-2, #f5f6f7)',
+    brand: 'var(--dsw-alias-state-business-primary, #3370ff)',
+    ok: 'var(--dsw-alias-state-success-primary, #00b42a)',
+  }
 
-  function BotCard(props: {
-    bot: BotView
+  function BotModal(props: {
+    mode: 'create' | 'edit'
+    bot?: BotView
     presets: string[]
-    onChanged: () => void
+    onClose: () => void
+    onSaved: () => void
   }): React.ReactNode {
-    const [name, setName] = React.useState(props.bot.workspaceTitle)
-    const [preset, setPreset] = React.useState(props.bot.preset)
+    const isEdit = props.mode === 'edit'
+    const [name, setName] = React.useState(props.bot?.workspaceTitle ?? '')
+    const [namespace, setNamespace] = React.useState(props.bot?.namespace ?? '')
+    const [preset, setPreset] = React.useState(props.bot?.preset ?? props.presets[0] ?? 'standard')
     const [busy, setBusy] = React.useState(false)
     const [err, setErr] = React.useState<string | null>(null)
     const save = async (): Promise<void> => {
       setBusy(true)
       setErr(null)
       try {
+        const method = isEdit ? 'PUT' : 'POST'
+        const body = isEdit
+          ? { id: props.bot?.id, preset, workspaceTitle: name }
+          : { namespace, name, preset }
         const res = await fetch('/api/wecom/bots', {
-          method: 'PUT',
+          method,
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ id: props.bot.id, preset, workspaceTitle: name }),
+          body: JSON.stringify(body),
         })
         if (!res.ok) {
           throw new Error(
             ((await res.json().catch(() => ({}))) as { error?: string }).error ?? '保存失败',
           )
         }
-        props.onChanged()
+        props.onSaved()
       } catch (e) {
         setErr(String(e))
       } finally {
         setBusy(false)
       }
     }
-    const del = async (): Promise<void> => {
-      setBusy(true)
-      setErr(null)
-      try {
-        const res = await fetch(`/api/wecom/bots?id=${encodeURIComponent(props.bot.id)}`, {
-          method: 'DELETE',
-        })
-        if (!res.ok) {
-          throw new Error(
-            ((await res.json().catch(() => ({}))) as { error?: string }).error ?? '删除失败',
-          )
-        }
-        props.onChanged()
-      } catch (e) {
-        setErr(String(e))
-      } finally {
-        setBusy(false)
-      }
-    }
+    const fieldLabel = (text: string): React.ReactNode =>
+      React.createElement(
+        'label',
+        {
+          style: {
+            display: 'block',
+            fontSize: '12px',
+            color: v.labelSecondary,
+            marginBottom: '4px',
+          },
+        },
+        text,
+      )
+    const input = (
+      value: string,
+      onChange: (next: string) => void,
+      placeholder?: string,
+    ): React.ReactNode =>
+      React.createElement('input', {
+        value,
+        placeholder,
+        onChange: (event: React.ChangeEvent<HTMLInputElement>) => onChange(event.target.value),
+        style: {
+          width: '100%',
+          boxSizing: 'border-box',
+          background: v.bgBase,
+          border: `1px solid ${v.borderL1}`,
+          borderRadius: '6px',
+          padding: '7px 10px',
+          fontSize: '13px',
+          color: v.labelPrimary,
+          outline: 'none',
+          fontFamily: 'inherit',
+        },
+      })
     return React.createElement(
       'div',
-      { className: 'wecom-mgr-card' },
+      {
+        style: {
+          position: 'fixed',
+          inset: 0,
+          zIndex: 70,
+          background: 'rgba(0,0,0,.35)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '24px',
+        },
+        onClick: props.onClose,
+      },
       React.createElement(
         'div',
-        { className: 'wecom-mgr-card-head' },
-        React.createElement('input', {
-          className: 'wecom-mgr-input',
-          value: name,
-          onChange: (event: React.ChangeEvent<HTMLInputElement>) => setName(event.target.value),
-          'aria-label': 'name',
-        }),
-        React.createElement(
-          'span',
-          { className: 'wecom-mgr-badge' },
-          props.bot.isDefault ? '默认' : props.bot.namespace,
-        ),
-        React.createElement(
-          'button',
-          {
-            type: 'button',
-            className: 'wecom-mgr-btn',
-            'data-danger': 'true',
-            disabled: busy || props.bot.isDefault,
-            title: props.bot.isDefault ? '默认机器人不可删除' : '删除',
-            onClick: () => void del(),
+        {
+          onClick: (event: { stopPropagation: () => void }) => event.stopPropagation(),
+          style: {
+            background: v.bgLayer2,
+            border: `1px solid ${v.borderL1}`,
+            borderRadius: '12px',
+            boxShadow: '0 12px 32px rgba(0,0,0,.18)',
+            width: '100%',
+            maxWidth: '520px',
+            maxHeight: '86vh',
+            overflow: 'auto',
+            padding: '20px 22px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '14px',
           },
-          '删除',
-        ),
-      ),
-      React.createElement(
-        'div',
-        { className: 'wecom-mgr-meta' },
-        `id: ${props.bot.id} · credential: ${props.bot.credentialName}`,
-      ),
-      React.createElement(
-        'div',
-        { className: 'wecom-mgr-field' },
+        },
         React.createElement(
           'div',
-          { className: 'wecom-mgr-label' },
-          'preset（决定这个 bot 的 persona 与工具）',
+          { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
+          React.createElement(
+            'h3',
+            { style: { margin: 0, fontSize: '15px', fontWeight: 600, color: v.labelPrimary } },
+            isEdit ? '编辑机器人' : '新建机器人',
+          ),
+          React.createElement(
+            'button',
+            {
+              type: 'button',
+              onClick: props.onClose,
+              style: {
+                marginLeft: 'auto',
+                border: 'none',
+                background: 'transparent',
+                color: v.labelTertiary,
+                cursor: 'pointer',
+                fontSize: '18px',
+                lineHeight: 1,
+                padding: '2px 6px',
+                flex: 'none',
+              },
+            },
+            '×',
+          ),
         ),
         React.createElement(
-          'select',
-          {
-            className: 'wecom-mgr-input',
-            value: preset,
-            onChange: (event: React.ChangeEvent<HTMLSelectElement>) =>
-              setPreset(event.target.value),
-          },
-          props.presets.map((p) => React.createElement('option', { key: p, value: p }, p)),
+          'div',
+          null,
+          fieldLabel('名字（替换工作区「WeCom」前缀）'),
+          input(name, setName),
         ),
-      ),
-      err !== null ? React.createElement('div', { className: 'wecom-mgr-error' }, err) : null,
-      React.createElement(
-        'div',
-        { className: 'wecom-mgr-row', style: { justifyContent: 'flex-end' } },
         React.createElement(
-          'button',
+          'div',
+          null,
+          fieldLabel('namespace（唯一标识，小写字母/数字/-）'),
+          isEdit
+            ? React.createElement(
+                'div',
+                {
+                  style: {
+                    fontSize: '13px',
+                    color: v.labelTertiary,
+                    padding: '7px 10px',
+                    background: v.bgLayer1,
+                    border: `1px solid ${v.borderL1}`,
+                    borderRadius: '6px',
+                  },
+                },
+                namespace,
+              )
+            : input(namespace, setNamespace, '例如：support'),
+        ),
+        React.createElement(
+          'div',
+          null,
+          fieldLabel('preset（决定这个 bot 的 persona 与工具）'),
+          React.createElement(
+            'select',
+            {
+              value: preset,
+              onChange: (event: React.ChangeEvent<HTMLSelectElement>) =>
+                setPreset(event.target.value),
+              style: {
+                width: '100%',
+                boxSizing: 'border-box',
+                background: v.bgBase,
+                border: `1px solid ${v.borderL1}`,
+                borderRadius: '6px',
+                padding: '7px 10px',
+                fontSize: '13px',
+                color: v.labelPrimary,
+                fontFamily: 'inherit',
+              },
+            },
+            props.presets.map((p) => React.createElement('option', { key: p, value: p }, p)),
+          ),
+        ),
+        err !== null
+          ? React.createElement(
+              'div',
+              { style: { fontSize: '12px', color: v.labelError, wordBreak: 'break-word' } },
+              err,
+            )
+          : null,
+        React.createElement(
+          'div',
           {
-            type: 'button',
-            className: 'wecom-mgr-btn',
-            disabled: busy,
-            onClick: () => void save(),
+            style: {
+              display: 'flex',
+              justifyContent: 'flex-end',
+              gap: '8px',
+              borderTop: `1px solid ${v.borderL1}`,
+              paddingTop: '12px',
+            },
           },
-          busy ? '保存中…' : '保存',
+          React.createElement(
+            'button',
+            {
+              type: 'button',
+              onClick: props.onClose,
+              style: {
+                border: `1px solid ${v.borderL1}`,
+                background: 'transparent',
+                color: v.labelPrimary,
+                borderRadius: '6px',
+                padding: '6px 14px',
+                cursor: 'pointer',
+                fontSize: '13px',
+              },
+            },
+            '取消',
+          ),
+          React.createElement(
+            'button',
+            {
+              type: 'button',
+              disabled: busy || name.trim() === '' || (!isEdit && namespace.trim() === ''),
+              onClick: () => void save(),
+              style: {
+                border: 'none',
+                background:
+                  busy || name.trim() === '' || (!isEdit && namespace.trim() === '')
+                    ? v.bgLayer1
+                    : v.brand,
+                color:
+                  busy || name.trim() === '' || (!isEdit && namespace.trim() === '')
+                    ? v.labelTertiary
+                    : '#fff',
+                borderRadius: '6px',
+                padding: '6px 14px',
+                cursor: 'pointer',
+                fontSize: '13px',
+              },
+            },
+            busy ? '保存中…' : '保存',
+          ),
         ),
       ),
     )
   }
 
-  function AddBotForm(props: { presets: string[]; onChanged: () => void }): React.ReactNode {
-    const [name, setName] = React.useState('')
-    const [namespace, setNamespace] = React.useState('')
-    const [preset, setPreset] = React.useState(props.presets[0] ?? 'standard')
-    const [busy, setBusy] = React.useState(false)
-    const [err, setErr] = React.useState<string | null>(null)
-    const add = async (): Promise<void> => {
-      setBusy(true)
-      setErr(null)
-      try {
-        const res = await fetch('/api/wecom/bots', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ namespace, name, preset }),
-        })
-        if (!res.ok) {
-          throw new Error(
-            ((await res.json().catch(() => ({}))) as { error?: string }).error ?? '新增失败',
-          )
-        }
-        setName('')
-        setNamespace('')
-        props.onChanged()
-      } catch (e) {
-        setErr(String(e))
-      } finally {
-        setBusy(false)
-      }
-    }
+  function renderBotCard(
+    bot: BotView,
+    presets: string[],
+    deps: {
+      editing: string | null
+      setEditing: (id: string | null) => void
+      busy: string | null
+      onDelete: (id: string) => void
+      onChanged: () => void
+    },
+  ): React.ReactNode {
     return React.createElement(
       'div',
-      { className: 'wecom-mgr-card' },
-      React.createElement('div', { style: { fontWeight: 600, marginBottom: '8px' } }, '新增机器人'),
+      {
+        key: bot.id,
+        style: {
+          border: `1px solid ${v.borderL1}`,
+          borderRadius: '10px',
+          background: v.bgBase,
+          display: 'flex',
+          flexDirection: 'column',
+          minWidth: 0,
+          overflow: 'hidden',
+          boxShadow: '0 1px 2px rgba(0,0,0,.04)',
+        },
+      },
       React.createElement(
         'div',
-        { className: 'wecom-mgr-field' },
+        {
+          style: { display: 'flex', alignItems: 'center', gap: '10px', padding: '14px 16px 10px' },
+        },
+        React.createElement(
+          'span',
+          {
+            style: {
+              fontWeight: 600,
+              fontSize: '14px',
+              color: v.labelPrimary,
+              minWidth: 0,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              lineHeight: 1.4,
+              flex: 1,
+            },
+          },
+          bot.workspaceTitle,
+        ),
+        bot.isDefault
+          ? React.createElement(
+              'span',
+              {
+                style: {
+                  flex: 'none',
+                  fontSize: '11px',
+                  color: v.brand,
+                  background: 'rgba(51,112,255,.1)',
+                  border: '1px solid rgba(51,112,255,.3)',
+                  borderRadius: '999px',
+                  padding: '1px 8px',
+                },
+              },
+              '默认',
+            )
+          : null,
+      ),
+      React.createElement(
+        'div',
+        {
+          style: {
+            padding: '12px 16px',
+            borderTop: `1px solid ${v.borderL1}`,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '8px',
+            background: v.bgLayer1,
+          },
+        },
         React.createElement(
           'div',
-          { className: 'wecom-mgr-label' },
-          '名字（替换工作区「WeCom」前缀）',
+          { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+          React.createElement(
+            'span',
+            {
+              style: {
+                flex: 'none',
+                fontSize: '11px',
+                color: v.labelTertiary,
+                background: v.bgLayer2,
+                border: `1px solid ${v.borderL1}`,
+                borderRadius: '4px',
+                padding: '1px 6px',
+              },
+            },
+            'preset',
+          ),
+          React.createElement(
+            'span',
+            {
+              style: {
+                fontWeight: 600,
+                color: v.labelPrimary,
+                minWidth: 0,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                fontSize: '13px',
+              },
+            },
+            bot.preset,
+          ),
         ),
-        React.createElement('input', {
-          className: 'wecom-mgr-input',
-          value: name,
-          placeholder: '例如：客服助手',
-          onChange: (event: React.ChangeEvent<HTMLInputElement>) => setName(event.target.value),
-        }),
-      ),
-      React.createElement(
-        'div',
-        { className: 'wecom-mgr-field' },
         React.createElement(
           'div',
-          { className: 'wecom-mgr-label' },
-          'namespace（唯一标识，小写字母/数字/-）',
+          { style: { fontSize: '12px', color: v.labelTertiary, wordBreak: 'break-all' } },
+          `id: ${bot.id} · namespace: ${bot.namespace} · credential: ${bot.credentialName}`,
         ),
-        React.createElement('input', {
-          className: 'wecom-mgr-input',
-          value: namespace,
-          placeholder: '例如：support',
-          onChange: (event: React.ChangeEvent<HTMLInputElement>) =>
-            setNamespace(event.target.value),
-        }),
-      ),
-      React.createElement(
-        'div',
-        { className: 'wecom-mgr-field' },
-        React.createElement('div', { className: 'wecom-mgr-label' }, 'preset'),
         React.createElement(
-          'select',
+          'div',
           {
-            className: 'wecom-mgr-input',
-            value: preset,
-            onChange: (event: React.ChangeEvent<HTMLSelectElement>) =>
-              setPreset(event.target.value),
+            style: {
+              display: 'flex',
+              justifyContent: 'flex-end',
+              gap: '8px',
+              borderTop: `1px solid ${v.borderL1}`,
+              paddingTop: '10px',
+              marginTop: '2px',
+            },
           },
-          props.presets.map((p) => React.createElement('option', { key: p, value: p }, p)),
-        ),
-      ),
-      err !== null ? React.createElement('div', { className: 'wecom-mgr-error' }, err) : null,
-      React.createElement(
-        'div',
-        { className: 'wecom-mgr-row', style: { justifyContent: 'flex-end' } },
-        React.createElement(
-          'button',
-          {
-            type: 'button',
-            className: 'wecom-mgr-btn',
-            disabled: busy || name.trim() === '' || namespace.trim() === '',
-            onClick: () => void add(),
-          },
-          busy ? '新增中…' : '新增',
+          React.createElement(
+            'button',
+            {
+              type: 'button',
+              onClick: () => deps.setEditing(bot.id),
+              style: {
+                border: `1px solid ${v.borderL1}`,
+                background: 'transparent',
+                color: v.labelPrimary,
+                borderRadius: '6px',
+                padding: '5px 12px',
+                cursor: 'pointer',
+                fontSize: '12px',
+              },
+            },
+            '编辑',
+          ),
+          bot.isDefault
+            ? null
+            : React.createElement(
+                'button',
+                {
+                  type: 'button',
+                  disabled: deps.busy === bot.id,
+                  onClick: () => deps.onDelete(bot.id),
+                  style: {
+                    border: `1px solid ${v.borderL1}`,
+                    background: 'transparent',
+                    color: v.labelError,
+                    borderRadius: '6px',
+                    padding: '5px 12px',
+                    cursor: 'pointer',
+                    fontSize: '12px',
+                  },
+                },
+                deps.busy === bot.id ? '删除中…' : '删除',
+              ),
         ),
       ),
     )
@@ -787,6 +1005,10 @@ export function apply(ctx: {
 
   function BotsManagerPanel(): React.ReactNode {
     useLocalStore(wmSubscribe, wmIsActive)
+    const [editing, setEditing] = React.useState<string | null>(null)
+    const [creating, setCreating] = React.useState(false)
+    const [busy, setBusy] = React.useState<string | null>(null)
+    const [panelErr, setPanelErr] = React.useState<string | null>(null)
     const active = wmIsActive()
     React.useEffect(() => {
       if (active) void loadBots()
@@ -798,54 +1020,174 @@ export function apply(ctx: {
       }, 15_000)
     }, [active])
     const data = store.botsData ?? { path: '', presets: [], bots: [], error: '加载中…' }
+    const onChanged = (): void => {
+      setPanelErr(null)
+      void loadBots()
+    }
+    const del = async (id: string): Promise<void> => {
+      setBusy(id)
+      setPanelErr(null)
+      try {
+        const res = await fetch(`/api/wecom/bots?id=${encodeURIComponent(id)}`, {
+          method: 'DELETE',
+        })
+        if (!res.ok) {
+          throw new Error(
+            ((await res.json().catch(() => ({}))) as { error?: string }).error ?? '删除失败',
+          )
+        }
+        onChanged()
+      } catch (e) {
+        setPanelErr(String(e))
+      } finally {
+        setBusy(null)
+      }
+    }
+    const cards = data.bots.map((bot) =>
+      renderBotCard(bot, data.presets, {
+        editing,
+        setEditing,
+        busy,
+        onDelete: (id) => void del(id),
+        onChanged,
+      }),
+    )
+    const editingBot = editing !== null ? data.bots.find((b) => b.id === editing) : undefined
+    const modal =
+      creating === true
+        ? React.createElement(BotModal, {
+            mode: 'create',
+            presets: data.presets,
+            onClose: () => setCreating(false),
+            onSaved: () => {
+              setCreating(false)
+              onChanged()
+            },
+          })
+        : editingBot !== undefined
+          ? React.createElement(BotModal, {
+              mode: 'edit',
+              bot: editingBot,
+              presets: data.presets,
+              onClose: () => setEditing(null),
+              onSaved: () => {
+                setEditing(null)
+                onChanged()
+              },
+            })
+          : null
     return React.createElement(
       'div',
-      { className: 'wecom-mgr-inner' },
+      {
+        style: {
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '16px',
+          padding: '16px 24px 40px',
+          width: '100%',
+          boxSizing: 'border-box',
+          minWidth: 0,
+        },
+      },
       React.createElement(
-        'div',
-        { className: 'wecom-mgr-head' },
-        React.createElement('span', null, '企微机器人'),
+        'header',
+        {
+          style: {
+            display: 'flex',
+            alignItems: 'center',
+            gap: '10px',
+            paddingBottom: '12px',
+            borderBottom: `1px solid ${v.borderL1}`,
+          },
+        },
         React.createElement(
           'button',
           {
             type: 'button',
-            className: 'wecom-panel-close',
             onClick: () => wmSetActive(false),
-            title: '关闭',
+            style: {
+              border: `1px solid ${v.borderL1}`,
+              background: 'transparent',
+              color: v.labelPrimary,
+              borderRadius: '6px',
+              padding: '4px 12px',
+              cursor: 'pointer',
+              fontSize: '12px',
+              flex: 'none',
+            },
           },
-          '×',
+          '← 返回',
         ),
-      ),
-      React.createElement(
-        'div',
-        { className: 'wecom-mgr-hint' },
-        data.path !== ''
-          ? `落盘：${data.path}（更改需重启 dsh-web 生效）`
-          : '更改需重启 dsh-web 生效',
-      ),
-      data.error !== undefined
-        ? React.createElement('div', { className: 'wecom-mgr-error' }, data.error)
-        : data.bots.map((bot) =>
-            React.createElement(BotCard, {
-              key: bot.id,
-              bot,
-              presets: data.presets,
-              onChanged: () => void loadBots(),
-            }),
-          ),
-      React.createElement(AddBotForm, { presets: data.presets, onChanged: () => void loadBots() }),
-      React.createElement(
-        'div',
-        { className: 'wecom-mgr-row', style: { justifyContent: 'flex-end' } },
+        React.createElement(
+          'h2',
+          {
+            style: {
+              margin: 0,
+              fontSize: '15px',
+              fontWeight: 600,
+              color: v.labelPrimary,
+              flex: 'none',
+            },
+          },
+          '企微机器人',
+        ),
+        React.createElement(
+          'span',
+          {
+            style: {
+              marginLeft: 'auto',
+              fontSize: '12px',
+              color: v.labelTertiary,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            },
+          },
+          data.path !== '' ? '更改需重启 dsh-web 生效' : '',
+        ),
         React.createElement(
           'button',
-          { type: 'button', className: 'wecom-mgr-btn', onClick: () => void loadBots() },
-          '刷新',
+          {
+            type: 'button',
+            onClick: () => setCreating(true),
+            style: {
+              flex: 'none',
+              border: 'none',
+              background: v.brand,
+              color: '#fff',
+              borderRadius: '6px',
+              padding: '5px 14px',
+              cursor: 'pointer',
+              fontSize: '12px',
+            },
+          },
+          '新建机器人',
         ),
       ),
+      data.error !== undefined
+        ? React.createElement(
+            'div',
+            { style: { fontSize: '12px', color: v.labelError, wordBreak: 'break-word' } },
+            data.error,
+          )
+        : null,
+      panelErr !== null
+        ? React.createElement(
+            'div',
+            { style: { fontSize: '12px', color: v.labelError, wordBreak: 'break-word' } },
+            panelErr,
+          )
+        : null,
+      cards.length === 0 && data.error === undefined
+        ? React.createElement(
+            'div',
+            { style: { fontSize: '13px', color: v.labelTertiary, padding: '8px 0' } },
+            '暂无机器人',
+          )
+        : cards,
+      modal,
     )
   }
-
   slots.inject('sidebar.footer.action', () =>
     slots.register({ name: 'sidebar.footer.action', id: 'wecom-status', order: 80 }, (props) =>
       React.createElement(FooterAction, { wide: props.wide === true }),
