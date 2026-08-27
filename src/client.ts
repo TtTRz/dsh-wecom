@@ -114,10 +114,6 @@ const CSS = [
   '.wecom-agent-row{display:flex;align-items:center;gap:8px;margin:6px 0}',
   '.wecom-agent-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
   '.wecom-agent-model{color:var(--dsw-alias-label-secondary);font-size:12px}',
-  '.wecom-bots{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 2px}',
-  '.wecom-bot-chip{display:flex;align-items:center;gap:5px;cursor:pointer;background:transparent;border:1px solid var(--dsw-alias-border-l1);color:var(--dsw-alias-label-secondary);border-radius:999px;padding:2px 9px;font-size:12px;line-height:16px}',
-  '.wecom-bot-chip:hover{color:var(--dsw-alias-label-primary)}',
-  '.wecom-bot-chip[data-active="true"]{background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-border-l2,var(--dsw-alias-border-l1))}',
 ].join('')
 
 interface Store {
@@ -125,8 +121,6 @@ interface Store {
   status: StatusView | null
   /** Sibling bot list from the primary payload; empty when single-bot. */
   bots: InstanceView[]
-  /** Selected sibling namespace, or null for the primary (default) row. */
-  selected: string | null
 }
 
 export const inject = ['slots', 'timer']
@@ -148,7 +142,7 @@ export function apply(ctx: {
     return () => element.remove()
   }, 'dsh-wecom.client-style')
 
-  const store: Store = { open: false, status: null, bots: [], selected: null }
+  const store: Store = { open: false, status: null, bots: [] }
   const listeners: Array<() => void> = []
   const emit = (): void => {
     for (const listener of [...listeners]) listener()
@@ -160,11 +154,6 @@ export function apply(ctx: {
   }
   const setStatus = (value: StatusView): void => {
     store.status = value
-    emit()
-  }
-  const selectBot = (id: string | null): void => {
-    if (store.selected === id) return
-    store.selected = id
     emit()
   }
   const subscribe = (listener: () => void): (() => void) => {
@@ -179,30 +168,15 @@ export function apply(ctx: {
     React.useEffect(() => subscribe(() => force((value) => value + 1)), [])
   }
 
-  /** Status base of the row being viewed: legacy path for the primary row. */
-  const viewBase = (): string =>
-    store.selected === null ? '/api/wecom' : `/api/wecom-${store.selected}`
-
   const poll = async (): Promise<void> => {
-    // The primary endpoint always refreshes first: it carries the bot list.
     try {
       const response = await fetch('/api/wecom/status')
       if (!response.ok) throw new Error(`status ${response.status}`)
       const data = (await response.json()) as StatusView
       store.bots = data.instances ?? []
-      if (store.selected === null) setStatus(data)
+      setStatus(data)
     } catch {
-      if (store.selected === null) setStatus({ available: false })
-    }
-    // Then the selected sibling's own payload (same wire shape, own route).
-    if (store.selected !== null) {
-      try {
-        const response = await fetch(`${viewBase()}/status`)
-        if (!response.ok) throw new Error(`status ${response.status}`)
-        setStatus((await response.json()) as StatusView)
-      } catch {
-        setStatus({ available: false })
-      }
+      setStatus({ available: false })
     }
   }
 
@@ -255,7 +229,9 @@ export function apply(ctx: {
     const restart = async (): Promise<void> => {
       setRestarting(true)
       try {
-        await fetch(`${viewBase()}/restart`, { method: 'POST' })
+        // Restarts the primary (default) row's long connection, the one this
+        // panel's payload comes from.
+        await fetch('/api/wecom/restart', { method: 'POST' })
       } catch {
         // status endpoint poll below surfaces the outcome
       }
@@ -268,18 +244,6 @@ export function apply(ctx: {
     }, [store.open])
     if (!store.open) return null
     const status = store.status ?? { available: false }
-    const connected = status.available === true && status.connected === true
-    const dotColor = connected
-      ? 'var(--dsw-alias-state-success-primary)'
-      : 'var(--dsw-alias-state-warn-primary)'
-    const connectionText =
-      status.available !== true
-        ? 'Unavailable'
-        : status.stopping === true
-          ? 'Stopping'
-          : connected
-            ? 'Connected'
-            : 'Disconnected'
     const rows: React.ReactNode[] = []
     if (status.available !== true) {
       rows.push(
@@ -336,17 +300,60 @@ export function apply(ctx: {
     const proc = status.process
     const counts = status.sessions
 
+    // Every bot coexists in one panel: the primary row (the one serving this
+    // payload) followed by each aggregated sibling. All WeCom conversations
+    // already appear in the global agents/sections below, so this list is
+    // connection health per bot rather than a switch between them.
+    const botRows: React.ReactNode[] = []
+    const pushBot = (
+      id: string,
+      available: boolean | undefined,
+      connected: boolean | undefined,
+      conversations: number | undefined,
+      lastError?: string | null,
+    ): void => {
+      const ok = available === true && connected === true
+      const color = available !== true
+        ? 'var(--dsw-alias-label-secondary)'
+        : ok
+          ? 'var(--dsw-alias-state-success-primary)'
+          : 'var(--dsw-alias-state-warn-primary)'
+      botRows.push(
+        React.createElement(
+          'div',
+          { key: id, className: 'wecom-panel-row' },
+          React.createElement(
+            'span',
+            { className: 'wecom-panel-label', title: lastError ?? undefined },
+            React.createElement('span', { className: 'wecom-dot', style: { background: color } }),
+            ` ${id}`,
+          ),
+          React.createElement(
+            'span',
+            null,
+            `${available === true ? String(conversations ?? 0) : '—'} conv`,
+          ),
+        ),
+      )
+    }
+    pushBot(status.namespace ?? 'default', status.available, status.connected, status.conversations)
+    for (const bot of store.bots) {
+      pushBot(
+        bot.id,
+        bot.available,
+        bot.connected,
+        bot.conversations,
+        bot.lastError,
+      )
+    }
+
     return React.createElement(
       'div',
       { className: 'wecom-panel' },
       React.createElement(
         'div',
         { className: 'wecom-panel-head' },
-        React.createElement(
-          'span',
-          null,
-          store.selected === null ? 'WeCom Bot' : `WeCom Bot · ${store.selected}`,
-        ),
+        React.createElement('span', null, 'WeCom Bots'),
         React.createElement(
           'button',
           {
@@ -358,84 +365,8 @@ export function apply(ctx: {
           '×',
         ),
       ),
-      // Bot switcher: one chip per aggregated row; the primary chip is always
-      // present once any sibling exists.
-      store.bots.length > 0
-        ? React.createElement(
-            'div',
-            { className: 'wecom-bots' },
-            React.createElement(
-              'button',
-              {
-                type: 'button',
-                className: 'wecom-bot-chip',
-                'data-active': store.selected === null ? 'true' : 'false',
-                onClick: () => selectBot(null),
-              },
-              React.createElement('span', {
-                className: 'wecom-dot',
-                style: {
-                  background:
-                    status.available === true && status.connected === true
-                      ? 'var(--dsw-alias-state-success-primary)'
-                      : status.available === true
-                        ? 'var(--dsw-alias-state-warn-primary)'
-                        : 'var(--dsw-alias-label-secondary)',
-                },
-              }),
-              'default',
-            ),
-            store.bots.map((bot) =>
-              React.createElement(
-                'button',
-                {
-                  key: bot.id,
-                  type: 'button',
-                  className: 'wecom-bot-chip',
-                  'data-active': store.selected === bot.id ? 'true' : 'false',
-                  title:
-                    bot.lastError !== undefined && bot.lastError !== null && bot.lastError !== ''
-                      ? bot.lastError
-                      : undefined,
-                  onClick: () => selectBot(bot.id),
-                },
-                React.createElement('span', {
-                  className: 'wecom-dot',
-                  style: {
-                    background:
-                      !bot.available || bot.connected === false
-                        ? 'var(--dsw-alias-label-secondary)'
-                        : bot.connected === true
-                          ? 'var(--dsw-alias-state-success-primary)'
-                          : 'var(--dsw-alias-state-warn-primary)',
-                  },
-                }),
-                bot.id,
-              ),
-            ),
-          )
-        : null,
-      React.createElement(
-        'div',
-        { className: 'wecom-panel-row' },
-        React.createElement('span', { className: 'wecom-panel-label' }, 'Connection'),
-        React.createElement(
-          'span',
-          null,
-          React.createElement('span', { className: 'wecom-dot', style: { background: dotColor } }),
-          ` ${connectionText}`,
-        ),
-      ),
-      React.createElement(
-        'div',
-        { className: 'wecom-panel-row' },
-        React.createElement('span', { className: 'wecom-panel-label' }, 'Conversations'),
-        React.createElement(
-          'span',
-          null,
-          status.available === true ? String(status.conversations) : '—',
-        ),
-      ),
+      React.createElement('div', { className: 'wecom-panel-section' }, 'Bots'),
+      botRows,
       React.createElement(
         'div',
         { className: 'wecom-panel-row' },
