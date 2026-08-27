@@ -55,21 +55,26 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
     reconnect: () => channel.reconnect(),
   }
   ctx.provide(channelStatusServiceName(namespace), status)
-  await ctx.effect(async function* () {
-    let stopped = false
-    yield async () => {
-      stopped = true
-      await channel.stop()
-    }
-    // Restart the channel after every unrecoverable end so a kicked or
-    // replaced long connection always comes back instead of leaving a dead bot.
-    await runChannelLoop(
-      channel,
-      resolved.restartIntervalMs,
-      ctx.logger('dsh-wecom'),
-      () => stopped,
-    )
-  }, 'dsh-wecom.websocket')
+  // The websocket loop runs for the life of the fiber. It must NOT be awaited
+  // inside apply(): an unresolved apply keeps this row in a non-loaded state,
+  // so the status service it provides stays invisible to other plugins — the
+  // console would report the bot as「未挂载」. Run the loop imperatively and
+  // tie its stop flag to the fiber's teardown via a synchronous effect.
+  const stop = { value: false }
+  const loop = runChannelLoop(
+    channel,
+    resolved.restartIntervalMs,
+    ctx.logger('dsh-wecom'),
+    () => stop.value,
+  )
+  void loop.catch(() => undefined)
+  ctx.effect(
+    () => () => {
+      stop.value = true
+      void channel.stop()
+    },
+    'dsh-wecom.websocket',
+  )
 }
 
 export default { name, inject, Config, apply }
