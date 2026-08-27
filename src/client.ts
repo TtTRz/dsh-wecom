@@ -1,14 +1,55 @@
 import * as React from 'react'
+import { createRoot } from 'react-dom/client'
 
 /**
  * Browser half of dsh-wecom: a WeCom status action in the sidebar foot plus a
- * floating status panel over `shell.overlay`. Both poll `GET /api/wecom/status`
- * served by the host half, so this plugin never touches channel internals.
+ * floating status panel over `shell.overlay`, and a WeCom-bot manager panel
+ * rendered as a center-column takeover (the skill-center pattern) under the
+ * dock's「企微机器人」entry. All read `GET /api/wecom/status` and
+ * `/api/wecom/bots` served by the host half, so this plugin never touches
+ * channel internals.
  *
  * The bundle is built to CommonJS and wrapped by `scripts/wrap-client.mjs`
  * into the factory form the web module loader executes.
  * @module dsh-wecom/client
  */
+
+// ── Bot manager takeover state (module scope, mirrors the skill-center) ─────
+const WM_PANEL_NAME = 'wecom-bots'
+const WM_ACTIVE_ATTR = 'data-dsh-wecom-active'
+const WM_VIEW_ATTR = 'data-dsh-wecom-view'
+// Shared "one takeover panel at a time" bus; the skill center dispatches the
+// same event so opening one closes the other.
+const WM_PANEL_EVENT = 'dsh-panel-activate'
+
+type WMListener = () => void
+const wmListeners = new Set<WMListener>()
+let wmActive = false
+function wmIsActive(): boolean {
+  return wmActive
+}
+function wmSetActive(next: boolean): void {
+  if (wmActive === next) return
+  wmActive = next
+  if (next) {
+    document.documentElement.setAttribute(WM_ACTIVE_ATTR, '')
+    window.dispatchEvent(new CustomEvent(WM_PANEL_EVENT, { detail: { name: WM_PANEL_NAME } }))
+  } else {
+    document.documentElement.removeAttribute(WM_ACTIVE_ATTR)
+  }
+  for (const fn of [...wmListeners]) fn()
+}
+function wmSubscribe(l: WMListener): () => void {
+  wmListeners.add(l)
+  return () => {
+    wmListeners.delete(l)
+  }
+}
+function useLocalStore(subscribe: (l: () => void) => () => void, get: () => boolean): boolean {
+  const [value, setValue] = React.useState(get)
+  React.useEffect(() => subscribe(() => setValue(get())), [subscribe, get])
+  return value
+}
 
 /** Minimal structural faces for the browser services this half consumes. */
 interface SlotRenderProps {
@@ -114,10 +155,15 @@ const CSS = [
   '.wecom-agent-row{display:flex;align-items:center;gap:8px;margin:6px 0}',
   '.wecom-agent-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
   '.wecom-agent-model{color:var(--dsw-alias-label-secondary);font-size:12px}',
-  '.wecom-mgr-panel{position:fixed;right:16px;bottom:16px;width:420px;max-height:78vh;overflow:auto;z-index:9999;pointer-events:auto;background:var(--dsw-alias-bg-overlay);border:1px solid var(--dsw-alias-border-l1);border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,0.25);padding:14px 16px;font-size:13px;color:var(--dsw-alias-label-primary)}',
+  // Bot manager takeover (center-column, skill-center pattern): hidden until
+  // `html[data-dsh-wecom-active]`, and hides the other center-column children.
+  `[${WM_VIEW_ATTR}]{display:none}`,
+  `html[${WM_ACTIVE_ATTR}] [${WM_VIEW_ATTR}]{display:flex;flex-direction:column;position:fixed;top:0;bottom:0;right:0;z-index:60;overflow:auto;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1f2329);padding:20px 24px;box-sizing:border-box}`,
+  `html[${WM_ACTIVE_ATTR}] [class*="centerCol"] > :not([${WM_VIEW_ATTR}]){display:none !important}`,
+  '.wecom-mgr-inner{max-width:720px;margin:0 auto;width:100%}',
   '.wecom-mgr-head{display:flex;align-items:center;justify-content:space-between;font-weight:600;margin-bottom:2px}',
   '.wecom-mgr-hint{color:var(--dsw-alias-state-warn-primary);font-size:12px;margin:4px 0 10px}',
-  '.wecom-mgr-card{border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:10px 12px;margin:8px 0}',
+  '.wecom-mgr-card{border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:12px 14px;margin:10px 0}',
   '.wecom-mgr-card-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px}',
   '.wecom-mgr-badge{font-size:11px;color:var(--dsw-alias-label-secondary);border:1px solid var(--dsw-alias-border-l1);border-radius:4px;padding:0 6px;white-space:nowrap}',
   '.wecom-mgr-meta{color:var(--dsw-alias-label-secondary);font-size:11px;margin-bottom:8px;word-break:break-all;line-height:1.6}',
@@ -133,12 +179,11 @@ const CSS = [
 ].join('')
 
 interface Store {
+  /** Whether the bottom-right status floating panel is open. */
   open: boolean
   status: StatusView | null
   /** Sibling bot list from the primary payload; empty when single-bot. */
   bots: InstanceView[]
-  /** Whether the bot manager dock panel is open. */
-  botsOpen: boolean
   /** Latest `/api/wecom/bots` payload, or null before the first load. */
   botsData: BotsView | null
 }
@@ -180,7 +225,7 @@ export function apply(ctx: {
     return () => element.remove()
   }, 'dsh-wecom.client-style')
 
-  const store: Store = { open: false, status: null, bots: [], botsOpen: false, botsData: null }
+  const store: Store = { open: false, status: null, bots: [], botsData: null }
   const listeners: Array<() => void> = []
   const emit = (): void => {
     for (const listener of [...listeners]) listener()
@@ -192,12 +237,6 @@ export function apply(ctx: {
   }
   const setStatus = (value: StatusView): void => {
     store.status = value
-    emit()
-  }
-  const setBotsOpen = (value: boolean): void => {
-    if (store.botsOpen === value) return
-    store.botsOpen = value
-    if (value) setOpen(false)
     emit()
   }
   const setBotsData = (value: BotsView): void => {
@@ -513,14 +552,13 @@ export function apply(ctx: {
   }
 
   function BotDockEntry(): React.ReactNode {
-    useStore()
-    const open = store.botsOpen
+    const open = useLocalStore(wmSubscribe, wmIsActive)
     return React.createElement(
       'button',
       {
         type: 'button',
         'data-dsh-logo-dock-item': '',
-        onClick: () => setBotsOpen(!open),
+        onClick: () => wmSetActive(!open),
         'aria-pressed': open,
         style: open ? { background: 'rgba(51,112,255,.12)' } : undefined,
       },
@@ -748,23 +786,21 @@ export function apply(ctx: {
   }
 
   function BotsManagerPanel(): React.ReactNode {
-    useStore()
-    // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — reload on open only
+    useLocalStore(wmSubscribe, wmIsActive)
+    const active = wmIsActive()
     React.useEffect(() => {
-      if (store.botsOpen) void loadBots()
-    }, [store.botsOpen])
-    // biome-ignore lint/correctness/useExhaustiveDependencies: timer depends on the open gate
+      if (active) void loadBots()
+    }, [active])
     React.useEffect(() => {
-      if (timer === undefined || !store.botsOpen) return undefined
+      if (timer === undefined || !active) return undefined
       return timer.interval(() => {
         void loadBots()
       }, 15_000)
-    }, [store.botsOpen])
-    if (!store.botsOpen) return null
+    }, [active])
     const data = store.botsData ?? { path: '', presets: [], bots: [], error: '加载中…' }
     return React.createElement(
       'div',
-      { className: 'wecom-mgr-panel' },
+      { className: 'wecom-mgr-inner' },
       React.createElement(
         'div',
         { className: 'wecom-mgr-head' },
@@ -774,7 +810,7 @@ export function apply(ctx: {
           {
             type: 'button',
             className: 'wecom-panel-close',
-            onClick: () => setBotsOpen(false),
+            onClick: () => wmSetActive(false),
             title: '关闭',
           },
           '×',
@@ -820,18 +856,76 @@ export function apply(ctx: {
       React.createElement(StatusPanel),
     ),
   )
-  // WeCom bot manager: a dock entry below the skill center, opening a floating
-  // panel that lists the deployment's dsh-wecom rows with per-bot preset and
-  // workspace-name editing (write-back to cordis.patch.yml, restart to apply).
+  // WeCom bot manager: a dock entry below the skill center opening a
+  // center-column takeover panel (skill-center pattern) that lists the
+  // deployment's dsh-wecom rows with per-bot preset and workspace-name editing
+  // (write-back to cordis.patch.yml, restart to apply).
   slots.inject('sidebar.logo.dock', () =>
     slots.register(
       { name: 'sidebar.logo.dock', id: 'wecom-bots', order: 40, label: 'WeCom Bots' },
       () => React.createElement(BotDockEntry),
     ),
   )
-  slots.inject('shell.overlay', () =>
-    slots.register({ name: 'shell.overlay', id: 'wecom-bots-panel', order: 55 }, () =>
-      React.createElement(BotsManagerPanel),
-    ),
-  )
+  installWecomBots(ctx)
+
+  function installWecomBots(context: typeof ctx): void {
+    context.effect(() => {
+      const onPanelEvent = (event: Event): void => {
+        const detail = (event as CustomEvent<{ name?: string }>).detail
+        if (detail !== null && detail !== undefined && detail.name !== WM_PANEL_NAME)
+          wmSetActive(false)
+      }
+      window.addEventListener(WM_PANEL_EVENT, onPanelEvent)
+
+      // Clicking anywhere in the sidebar (outside the dock rows) closes the
+      // takeover panel — selecting a session ends the overlay.
+      const onSidebarClick = (event: MouseEvent): void => {
+        const target = event.target as HTMLElement | null
+        if (target === null) return
+        if (target.closest('[class*="sidebarCol"]') === null) return
+        if (target.closest('[data-dsh-logo-dock]') !== null) return
+        wmSetActive(false)
+      }
+      document.addEventListener('click', onSidebarClick, { capture: true })
+
+      let container: HTMLDivElement | null = null
+      let root: ReturnType<typeof createRoot> | null = null
+      let rafId = 0
+      let stopped = false
+      const ensure = (): void => {
+        const center = document.querySelector<HTMLElement>('[class*="centerCol"]')
+        if (center === null) return
+        if (container === null) {
+          container = document.createElement('div')
+          container.setAttribute(WM_VIEW_ATTR, '')
+        }
+        if (container.parentNode !== center) center.appendChild(container)
+        const sidebar = document.querySelector<HTMLElement>('[class*="sidebarCol"]')
+        if (sidebar !== null) {
+          const right = Math.round(sidebar.getBoundingClientRect().right)
+          if (container.style.left !== `${right}px`) container.style.left = `${right}px`
+        }
+        if (root === null) {
+          root = createRoot(container)
+          root.render(React.createElement(BotsManagerPanel))
+        }
+      }
+      const tick = (): void => {
+        if (stopped) return
+        ensure()
+        rafId = requestAnimationFrame(tick)
+      }
+      rafId = requestAnimationFrame(tick)
+      return () => {
+        stopped = true
+        cancelAnimationFrame(rafId)
+        window.removeEventListener(WM_PANEL_EVENT, onPanelEvent)
+        document.removeEventListener('click', onSidebarClick, true)
+        root?.unmount()
+        if (container !== null && container.parentNode !== null)
+          container.parentNode.removeChild(container)
+        wmSetActive(false)
+      }
+    }, 'dsh-wecom.bots-manager')
+  }
 }
