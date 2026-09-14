@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { freemem, loadavg, totalmem } from 'node:os'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ChannelStatus } from './channel.js'
+import { type StoredSessionHeader, storedSessionHeader } from './session-log.js'
 
 /** One live agent projected to the wire; scalars only, no live objects. */
 export interface AgentView {
@@ -125,7 +126,7 @@ interface AgentsLike {
   list(): readonly AgentLike[]
 }
 interface PersistenceLike {
-  list(): Promise<readonly { id: string }[]>
+  list(): Promise<readonly unknown[]>
 }
 
 /**
@@ -153,8 +154,13 @@ export function registerStatusRoute(
       try {
         const agents = (ctx.get('agents') as AgentsLike | undefined)?.list() ?? []
         const persistence = ctx.get('sessionPersistence') as PersistenceLike | undefined
-        const sessionIds =
-          persistence === undefined ? [] : (await persistence.list()).map((h) => String(h.id))
+        const entries = persistence === undefined ? [] : await persistence.list()
+        // `list()` returns stored headers on 0.1.0-rc.x and snapshot wrappers on
+        // 0.1.5-rc.x; count ids off whichever shape arrived.
+        const sessionIds = entries
+          .map(storedSessionHeader)
+          .filter((header): header is StoredSessionHeader => header !== undefined)
+          .map((header) => header.id)
         send(200, statusPayload(snapshot(), agents, sessionIds, peerOf))
       } catch (error) {
         send(500, { available: false, error: String(error) })

@@ -72,4 +72,17 @@ describe('runChannelLoop', () => {
     channel.kill()
     await expect(loop).resolves.toBeUndefined()
   })
+
+  it('does not restart when stopped during the backoff', async () => {
+    vi.useFakeTimers()
+    const channel = fakeChannel({ deadAfterStarts: 1 })
+    let stopped = false
+    const loop = runChannelLoop(channel, 10, { warn: vi.fn(), error: vi.fn() }, () => stopped)
+    // First start dies, the loop logs and parks in the restart backoff.
+    await vi.advanceTimersByTimeAsync(5)
+    stopped = true
+    await vi.advanceTimersByTimeAsync(50)
+    await loop
+    expect(channel.starts()).toBe(1)
+  })
 })

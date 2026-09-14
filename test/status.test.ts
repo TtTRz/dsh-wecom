@@ -173,6 +173,49 @@ describe('registerStatusRoute', () => {
     expect(typeof dispose).toBe('function')
   })
 
+  it('counts sessions that arrive as 0.1.5 snapshot wrappers', async () => {
+    const routes: Array<{
+      handler: (req: unknown, res: never) => Promise<void> | void
+    }> = []
+    const ctx = {
+      get: vi.fn((name: string) => {
+        if (name === 'webServer') {
+          return {
+            register: (route: unknown) => {
+              routes.push(route as never)
+              return () => undefined
+            },
+          }
+        }
+        if (name === 'agents') return { list: () => [] }
+        if (name === 'sessionPersistence') {
+          // 0.1.5-rc.x: list() wraps each stored header in a snapshot.
+          return {
+            list: async () => [
+              { header: { id: 'dsh-wecom-single-a' }, revision: 'r1', sizeBytes: 10 },
+              { header: { id: 'session-b' }, revision: 'r2', sizeBytes: 20 },
+            ],
+          }
+        }
+        return undefined
+      }),
+    }
+    registerStatusRoute(ctx as never, () => snapshot)
+
+    const res = {
+      statusCode: 0,
+      body: '',
+      setHeader() {},
+      end(body: string) {
+        this.body = body
+      },
+    }
+    await routes[0]?.handler({}, res as never)
+
+    expect(res.statusCode).toBe(200)
+    expect(JSON.parse(res.body).sessions).toEqual({ total: 2, wecom: 1 })
+  })
+
   it('answers 500 with a structured error when providers throw', async () => {
     const routes: unknown[] = []
     const ctx = {

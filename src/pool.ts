@@ -23,6 +23,13 @@ import type { ResolvedConfig } from './config.js'
 import { clipUtf8, conversationId, Semaphore } from './helpers.js'
 import { type MediaPort, safeFilename, saveUploadFile } from './media.js'
 import { containsImageMedia, toContentBlocks } from './message.js'
+import {
+  type SessionLogLike,
+  sessionLog,
+  sessionLogFrom,
+  sessionLogLength,
+  storedSessionHeader,
+} from './session-log.js'
 
 /** One tool invocation observed during a turn, for the optional activity summary. */
 export interface ToolCallSummary {
@@ -36,6 +43,79 @@ export interface ToolCallSummary {
 export interface TurnDelta {
   kind: 'text' | 'reasoning'
   text: string
+}
+
+/** One streamed assistant chunk, as both harness generations deliver it. */
+interface AssistantChunkLike {
+  type?: string
+  text?: string
+}
+
+/** One transient attempt frame: `start`, `chunk` or `end`. */
+interface AssistantFrameLike {
+  type?: string
+  chunk?: AssistantChunkLike
+}
+
+/**
+ * Tools whose image blocks are an EXISTING picture handed back to the model —
+ * the harness vision reader, not a card rendered for the chat. Forwarding them
+ * would echo the user's own upload straight back at them, so they are skipped
+ * when collecting the reply's images — both when such a tool is called directly
+ * and when a `run_code` program bridges it (see SUB_DISPATCH_EVENTS).
+ * `read_image` is the reader dsh-tool-fs registers for looking at a stored image.
+ */
+const IMAGE_READER_TOOLS = new Set(['read_image'])
+
+/**
+ * Nested tool-dispatch events. A Code Mode (`run_code`) program bridges every
+ * sub-call through these, and the enclosing result carries the images those
+ * sub-calls produced while being named `run_code` itself — so the reader behind
+ * an image is only visible on the SUB-call name.
+ *
+ * 0.1.5-rc.x logs `tool/ptc-dispatch`; 0.1.0-rc.x logged the same payload under
+ * `tool/code-dispatch`.
+ */
+const SUB_DISPATCH_EVENTS = new Set(['tool/ptc-dispatch', 'tool/code-dispatch'])
+
+/**
+ * Collect the image attachment refs inside one tool-result content tree: the
+ * blocks a native result carries, or the ones a `run_code` result has attached
+ * from its sub-calls. Preserve occurrence order; deciding whether an image is
+ * user-facing belongs to the producing call, not to its content-addressed id.
+ */
+function collectImageRefs(content: unknown, into: ImageAttachmentRef[]): void {
+  if (!Array.isArray(content)) return
+  for (const block of content as Array<{
+    type?: unknown
+    attachment?: ImageAttachmentRef
+    content?: unknown
+  }>) {
+    if (block === null || typeof block !== 'object') continue
+    if (block.type === 'image' && block.attachment !== undefined) {
+      into.push(block.attachment)
+      continue
+    }
+    if (block.type === 'tool-result') collectImageRefs(block.content, into)
+  }
+}
+
+/**
+ * Subscribe to the transient attempt frames dsh-agent 0.1.5-rc.x publishes on
+ * the agent-scoped `agent/assistant-stream` event.
+ *
+ * 0.1.0-rc.x never emits this event (its deltas are durable `assistant/chunk`
+ * session events instead), so callers subscribe to BOTH feeds: the frames are
+ * the only live deltas on 0.1.5, and — because they are transient — they are
+ * also the only progress signal a long answer gives while it is streaming.
+ */
+function onAssistantFrame(agent: Agent, handler: (frame: AssistantFrameLike) => void): () => void {
+  const ctx = agent.ctx as unknown as {
+    on(name: string, handler: (payload: { frame?: AssistantFrameLike }) => void): () => void
+  }
+  return ctx.on('agent/assistant-stream', ({ frame }) => {
+    if (frame !== undefined) handler(frame)
+  })
 }
 
 /** The text one finished turn produced, plus optional reasoning/tool activity. */
@@ -264,7 +344,7 @@ export class ApprovalBridge {
 
   /** The audit `approval/asked` id for this ask, from the session log tail. */
   private approvalIdOf(req: ApprovalRequestLike): string | undefined {
-    const events = req.agent.session.events as readonly {
+    const events = sessionLog(req.agent.session) as readonly {
       type?: string
       data?: { id?: unknown; callId?: unknown }
     }[]
@@ -316,9 +396,13 @@ function stripEpoch(id: string): string {
   return id.replace(/~g\d+$/, '')
 }
 
-/** Structural face of the harness approval request (agent, tool, signal). */
+/**
+ * Structural face of the harness approval request (agent, tool, signal). The
+ * session carries only the log accessors this plugin reads, on either side of
+ * the dsh-session 0.1.5 `events` → `snapshotEvents()` change.
+ */
 interface ApprovalRequestLike {
-  agent: { session: { id: unknown; events: unknown } }
+  agent: { session: { id: unknown } & SessionLogLike }
   toolName: string
   reason?: string
   signal?: {
@@ -356,6 +440,8 @@ export class AgentPool {
   private workspacePromise: Map<string, Promise<WorkspaceLike | undefined>> | undefined
   /** Stored session cwd per conversation id, loaded at start and updated on create. */
   private headerCwds = new Map<string, string>()
+  /** Resolved per-conversation directory, minted once per session id (see conversationDir). */
+  private readonly conversationDirs = new Map<string, string>()
   /**
    * Per-chat directories whose workspace row the user deleted in the web UI.
    * Tombstones are recorded by a runtime watcher and persisted in the state
@@ -406,11 +492,14 @@ export class AgentPool {
    * `groupSession` covers any later first message regardless.
    */
   async start(): Promise<void> {
-    const headers = await this.ctx.sessionPersistence.list()
-    this.persisted = new Set(headers.map((header) => String(header.id)))
+    // `list()` hands back stored headers on 0.1.0-rc.x but snapshot wrappers on
+    // 0.1.5-rc.x, so unwrap both (see storedSessionHeader).
+    const headers = (await this.ctx.sessionPersistence.list())
+      .map(storedSessionHeader)
+      .filter((header) => header !== undefined)
+    this.persisted = new Set(headers.map((header) => header.id))
     for (const header of headers) {
-      const cwd = (header as { cwd?: string }).cwd
-      if (cwd !== undefined) this.headerCwds.set(String(header.id), cwd)
+      if (header.cwd !== undefined) this.headerCwds.set(header.id, header.cwd)
     }
     await mkdir(this.config.cwd, { recursive: true })
     this.loadState()
@@ -429,10 +518,8 @@ export class AgentPool {
     // gates the retry loop only; workspaces resolve inside groupSession.
     if (this.ctx.get('workspaceRegistry') !== undefined) {
       for (const header of headers) {
-        const id = String(header.id)
-        const cwd = (header as { cwd?: string }).cwd
-        if (id.startsWith('dsh-wecom-') && cwd !== undefined) {
-          await this.groupSession(id, cwd)
+        if (header.id.startsWith('dsh-wecom-') && header.cwd !== undefined) {
+          await this.groupSession(header.id, header.cwd)
         }
       }
     }
@@ -634,6 +721,22 @@ export class AgentPool {
    * as-is once a chat already has one, so live sessions never move.
    */
   private conversationDir(id: string): string {
+    // Resolved ONCE per session id. The name below is minted from the clock, and
+    // the create path asks for it repeatedly (the session header cwd first, the
+    // workspace mkdir after the harness has created the session). Recomputing it
+    // lets the stamp cross a second boundary in between, so the session records
+    // a cwd that was never created — and every tool spawn in that session then
+    // fails with ENOENT on the missing directory.
+    const cached = this.conversationDirs.get(id)
+    if (cached !== undefined) return cached
+    // A session we already know the cwd of (resumed, or created earlier in this
+    // process) is authoritative: the harness stores the session there and spawns
+    // its tools there, so every later lookup must agree with it.
+    const stored = this.headerCwds.get(id)
+    if (stored !== undefined) {
+      this.conversationDirs.set(id, stored)
+      return stored
+    }
     // Keyed by the FULL session id: each /reset epoch (its own session id,
     // ~gN suffix) mints a distinct directory, so every session gets its own
     // sandbox cwd and its own workspace row.
@@ -642,11 +745,17 @@ export class AgentPool {
     const pattern = new RegExp(`^WeCom-.*-${escaped}$`)
     try {
       const hit = readdirSync(this.config.cwd).find((name) => pattern.test(name))
-      if (hit !== undefined) return join(this.config.cwd, hit)
+      if (hit !== undefined) {
+        const dir = join(this.config.cwd, hit)
+        this.conversationDirs.set(id, dir)
+        return dir
+      }
     } catch {
       // base not readable yet — fall through to mint a new name
     }
-    return join(this.config.cwd, `WeCom-${this.peerTag(id)}-${this.firstSeenStamp()}-${tail6}`)
+    const dir = join(this.config.cwd, `WeCom-${this.peerTag(id)}-${this.firstSeenStamp()}-${tail6}`)
+    this.conversationDirs.set(id, dir)
+    return dir
   }
 
   /** Readable, filesystem-safe peer tag for the directory name. */
@@ -745,7 +854,7 @@ export class AgentPool {
     if (kind === 'user') {
       let canonical = this.canonicalTitles.get(id)
       if (canonical === undefined) {
-        canonical = this.previousTitle(session.events, event.seq) ?? title
+        canonical = this.previousTitle(sessionLog(session), event.seq) ?? title
       }
       this.canonicalTitles.set(id, canonical)
       if (title !== canonical) this.renameSession(session, canonical)
@@ -1032,31 +1141,57 @@ export class AgentPool {
     download: MediaPort['download'],
     onDelta?: (delta: TurnDelta) => void,
   ): Promise<Reply> {
-    const start = agent.session.events.length
+    const start = sessionLogLength(agent.session)
     const reasoning: string[] = []
     const pendingCalls = new Map<string, { name: string; arguments: string }>()
     const toolCalls: ToolCallSummary[] = []
+    /** User-facing images, collected at the direct or bridged call that produced them. */
     const images: ImageAttachmentRef[] = []
+    /** Outer calls whose images were already classified through sub-dispatch events. */
+    const compositeCalls = new Set<string>()
+    /** Fold one model chunk into the live stream and the reasoning summary. */
+    const absorbChunk = (chunk: AssistantChunkLike): void => {
+      if (chunk.type === 'text-delta' && chunk.text) {
+        onDelta?.({ kind: 'text', text: chunk.text })
+      } else if (chunk.type === 'reasoning-delta' && chunk.text) {
+        reasoning.push(chunk.text)
+        onDelta?.({ kind: 'reasoning', text: chunk.text })
+      }
+    }
     // Observe this agent's session firehose for the duration of the turn:
     // forward text deltas for streaming and collect reasoning + tool activity
     // for the optional final summary. Scoped to the agent, so we see only its
-    // events and the listener is torn down with `off()` after the turn.
+    // events and the listeners are torn down with `off()` after the turn.
     const off = agent.ctx.on('session/event', (_session, event: SessionEvent) => {
       if (event.type === 'assistant/chunk') {
-        const chunk = event.data.chunk
-        if (chunk.type === 'text-delta' && chunk.text) {
-          onDelta?.({ kind: 'text', text: chunk.text })
-        } else if (chunk.type === 'reasoning-delta' && chunk.text) {
-          reasoning.push(chunk.text)
-          onDelta?.({ kind: 'reasoning', text: chunk.text })
-        }
+        absorbChunk(event.data.chunk)
       } else if (event.type === 'tool/call') {
         pendingCalls.set(event.data.callId, {
           name: event.data.name,
           arguments: event.data.arguments,
         })
+      } else if (SUB_DISPATCH_EVENTS.has(String(event.type))) {
+        // Classify an image at its real sub-call producer. The enclosing
+        // `run_code` result aggregates these blocks under its own name, so it
+        // must not be collected again after at least one valid dispatch event.
+        const dispatch = (
+          event as unknown as {
+            data?: { parentCallId?: unknown; name?: unknown; content?: unknown }
+          }
+        ).data
+        if (
+          typeof dispatch?.parentCallId === 'string' &&
+          dispatch.parentCallId.length > 0 &&
+          typeof dispatch.name === 'string'
+        ) {
+          compositeCalls.add(dispatch.parentCallId)
+          if (!IMAGE_READER_TOOLS.has(dispatch.name)) {
+            collectImageRefs(dispatch.content, images)
+          }
+        }
       } else if (event.type === 'tool/result') {
-        const call = pendingCalls.get(event.data.message.source.callId)
+        const callId = event.data.message.source.callId
+        const call = pendingCalls.get(callId)
         toolCalls.push({
           name: call?.name ?? event.data.message.source.callId,
           arguments: call?.arguments ?? '',
@@ -1065,15 +1200,19 @@ export class AgentPool {
         })
         // Cards rendered by tools (e.g. render_card) arrive as image blocks in
         // the tool-result content; collect their durable refs for the reply.
-        for (const block of event.data.message.content ?? []) {
-          if (block.type !== 'tool-result') continue
-          for (const inner of block.content) {
-            if (inner.type === 'image') {
-              images.push(inner.attachment)
-            }
-          }
+        // Readers (read_image) instead hand back a picture the model asked to
+        // look at — usually the one the user just sent — so they are not cards.
+        if (
+          (call === undefined || !IMAGE_READER_TOOLS.has(call.name)) &&
+          !compositeCalls.has(String(callId))
+        ) {
+          collectImageRefs(event.data.message.content, images)
         }
       }
+    })
+    // dsh-agent 0.1.5-rc.x delivers the same deltas as transient attempt frames.
+    const offFrames = onAssistantFrame(agent, (frame) => {
+      if (frame.type === 'chunk') absorbChunk(frame.chunk ?? {})
     })
     try {
       const includeImages = containsImageMedia(message) ? await this.canViewImages(agent) : false
@@ -1086,8 +1225,9 @@ export class AgentPool {
       await this.settleTurn(agent)
     } finally {
       off()
+      offFrames()
     }
-    const reply = this.extractText(agent.session.events.slice(start))
+    const reply = this.extractText(sessionLogFrom(agent.session, start))
     if (reasoning.length > 0) reply.reasoning = reasoning.join('')
     if (toolCalls.length > 0) reply.toolCalls = toolCalls
     if (images.length > 0) reply.images = images
@@ -1122,6 +1262,12 @@ export class AgentPool {
     const off = agent.ctx.on('session/event', () => {
       arm()
     })
+    // 0.1.5-rc.x streams through transient frames instead of durable session
+    // events, so liveness has to follow that feed too: without it a long answer
+    // that is still producing tokens looks "no progress" and gets cancelled.
+    const offFrames = onAssistantFrame(agent, () => {
+      arm()
+    })
     arm()
     const watchIdle = agent.whenIdle().then(() => {
       if (!timedOut) settle?.()
@@ -1130,6 +1276,7 @@ export class AgentPool {
       await idle
     } finally {
       off()
+      offFrames()
       if (timer !== undefined) clearTimeout(timer)
       void watchIdle.catch(() => undefined)
     }
@@ -1175,6 +1322,7 @@ export class AgentPool {
     const setup = this.mountPreset(resolvedPreset)
 
     if (this.persisted.has(id)) {
+      await this.ensureStoredCwd(id)
       const handle = await this.ctx.agents.resume({
         resumeSessionId: sessionId,
         agentOptions,
@@ -1196,6 +1344,27 @@ export class AgentPool {
     this.headerCwds.set(id, this.conversationDir(id))
     await this.groupSession(id, this.conversationDir(id), { revive: true })
     return handle
+  }
+
+  /**
+   * Make sure the directory a persisted session was recorded in exists.
+   *
+   * Directory names are minted from the clock (see {@link conversationDir}), so
+   * a session created before that name was resolved once could be recorded in a
+   * path the workspace `mkdir` never created — its tools then spawn in a missing
+   * cwd and fail with ENOENT. Creating the recorded path repairs such a session
+   * in place. Only paths inside our own workspace root are touched.
+   */
+  private async ensureStoredCwd(id: string): Promise<void> {
+    const stored = this.headerCwds.get(id)
+    if (stored === undefined) return
+    const root = this.config.cwd.endsWith('/') ? this.config.cwd : `${this.config.cwd}/`
+    if (!stored.startsWith(root)) return
+    try {
+      await mkdir(stored, { recursive: true })
+    } catch (error) {
+      this.log.warn('WeCom workspace repair failed for %s: %s', stored, String(error))
+    }
   }
 
   /**

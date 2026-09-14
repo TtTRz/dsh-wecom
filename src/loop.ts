@@ -20,6 +20,9 @@ export async function runChannelLoop(
   isStopped: () => boolean,
 ): Promise<void> {
   for (;;) {
+    // Never (re)start a channel the fiber already tore down: a stop during the
+    // backoff must not resurrect the long connection.
+    if (isStopped()) return
     try {
       await channel.start()
       await channel.untilDead()

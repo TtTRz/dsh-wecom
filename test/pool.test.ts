@@ -1,4 +1,5 @@
-import { readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { conversationId } from '../src/helpers.js'
@@ -17,20 +18,74 @@ interface FakeAgent {
   followup: ReturnType<typeof vi.fn>
   whenIdle: ReturnType<typeof vi.fn>
   fire: (event: string, ...args: unknown[]) => void
+  /** Finish a `hang: true` turn: push the closing events, then go idle. */
+  release: () => void
+}
+
+/** Which harness session API the double should look like. */
+type SessionApi = 'legacy' | 'snapshot'
+
+/**
+ * Session double. `legacy` mirrors dsh-session 0.1.0-rc.x (`events` getter);
+ * `snapshot` mirrors 0.1.5-rc.x, where that getter is gone and the log is read
+ * through `snapshotEvents()` — the shape that made every production turn fail
+ * with `Cannot read properties of undefined (reading 'length')`.
+ *
+ * The declared type keeps the legacy surface so existing tests can push events;
+ * the snapshot double deliberately carries NO `events` property, so a code path
+ * that still reads it throws here exactly as it did in production.
+ */
+function fakeSession(events: unknown[], id = '', api: SessionApi = 'legacy'): FakeAgent['session'] {
+  const requestHeader = (): undefined => undefined
+  if (api === 'legacy') return { id, events, requestHeader }
+  return {
+    id,
+    get seq() {
+      return events.length
+    },
+    ownEvents: () => events.slice(),
+    snapshotEvents: (from = 0, to = events.length) => events.slice(from, to),
+    requestHeader,
+  } as unknown as FakeAgent['session']
 }
 
 function makeAgent(
-  options: { hang?: boolean; replyText?: string; stream?: unknown[] } = {},
+  options: {
+    hang?: boolean
+    replyText?: string
+    stream?: unknown[]
+    /** Live attempt frames, as dsh-agent 0.1.5-rc.x publishes them. */
+    frames?: unknown[]
+    sessionApi?: SessionApi
+  } = {},
 ): FakeAgent {
   const events: unknown[] = []
   const handlers = new Map<string, Set<(...args: unknown[]) => void>>()
   const fire = (event: string, ...args: unknown[]): void => {
     for (const handler of handlers.get(event) ?? []) handler(...args)
   }
+  let releaseIdle: (() => void) | undefined
+  let idle: Promise<void> | undefined
+  /** The events every completed turn ends with (mirrors the real harness). */
+  const closeTurn = (): void => {
+    const closing = [
+      {
+        type: 'assistant/message',
+        data: {
+          message: { content: [{ type: 'text', text: options.replyText ?? 'Harness reply' }] },
+        },
+      },
+      { type: 'turn/end', data: { reason: { kind: 'completed' } } },
+    ]
+    for (const event of closing) {
+      events.push(event)
+      fire('session/event', agent.session, event)
+    }
+  }
   const agent: FakeAgent = {
     status: 'idle',
     options: { provider: 'deepseek', model: 'deepseek-chat' },
-    session: { id: '', events, requestHeader: () => undefined },
+    session: fakeSession(events, '', options.sessionApi),
     ctx: {
       on: (event: string, handler: (...args: unknown[]) => void) => {
         const set = handlers.get(event) ?? new Set<(...args: unknown[]) => void>()
@@ -48,25 +103,128 @@ function makeAgent(
         events.push(event)
         fire('session/event', agent.session, event)
       }
-      events.push({
-        type: 'assistant/message',
-        data: {
-          message: { content: [{ type: 'text', text: options.replyText ?? 'Harness reply' }] },
-        },
-      })
-      events.push({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
+      // 0.1.5-rc.x: the same deltas arrive as transient attempt frames on an
+      // agent-scoped event and never enter the durable session log.
+      for (const frame of options.frames ?? []) fire('agent/assistant-stream', { agent, frame })
+      closeTurn()
     }),
     whenIdle: vi.fn(() => {
-      if (options.hang) return new Promise(() => undefined)
+      if (options.hang) {
+        idle ??= new Promise<void>((resolve) => {
+          releaseIdle = resolve
+        })
+        return idle.then(() => {
+          agent.status = 'idle'
+        })
+      }
       agent.status = 'idle'
       return Promise.resolve()
     }),
+    release: () => {
+      if (releaseIdle === undefined) return
+      closeTurn()
+      const resolve = releaseIdle
+      releaseIdle = undefined
+      resolve()
+    },
     fire,
   }
   return agent
 }
 
-function makeHarness() {
+/**
+ * A turn whose single tool call returns one image block — the shape both the
+ * harness vision reader (`read_image`) and a card renderer (`render_card`) use.
+ */
+function makeImageTurn(toolName: string, attachmentId: string): FakeAgent {
+  return makeAgent({
+    stream: [
+      {
+        type: 'tool/call',
+        data: { turn: 1, step: 1, callId: 'c1', name: toolName, arguments: '{}' },
+      },
+      {
+        type: 'tool/result',
+        data: {
+          turn: 1,
+          step: 1,
+          message: {
+            source: { kind: 'tool', callId: 'c1' },
+            content: [
+              {
+                type: 'tool-result',
+                content: [
+                  {
+                    type: 'image',
+                    attachment: {
+                      attachmentId,
+                      mediaType: 'image/png',
+                      bytes: 3,
+                      width: 10,
+                      height: 10,
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      },
+    ],
+  })
+}
+
+/**
+ * A Code Mode turn: `run_code` bridges one sub-call (the harness logs it on
+ * `tool/ptc-dispatch`) and attaches that sub-result's image to the OUTER
+ * `run_code` result — so the name on the result is `run_code`, not the tool that
+ * produced the picture.
+ */
+function makePtcImageTurn(
+  subCalls: readonly { name: string; attachmentId: string }[],
+  eventType = 'tool/ptc-dispatch',
+): FakeAgent {
+  const contents = subCalls.map(({ attachmentId }) => [
+    { type: 'text', text: 'sub-call output' },
+    {
+      type: 'image',
+      attachment: { attachmentId, mediaType: 'image/png', bytes: 3, width: 10, height: 10 },
+    },
+  ])
+  return makeAgent({
+    stream: [
+      {
+        type: 'tool/call',
+        data: { turn: 1, step: 1, callId: 'c1', name: 'run_code', arguments: '{}' },
+      },
+      ...subCalls.map(({ name }, index) => ({
+        type: eventType,
+        data: {
+          rootCallId: 'c1',
+          parentCallId: 'c1',
+          subCallId: `c1:ptc:${index + 1}`,
+          name,
+          arguments: {},
+          isError: false,
+          content: contents[index],
+        },
+      })),
+      {
+        type: 'tool/result',
+        data: {
+          turn: 1,
+          step: 1,
+          message: {
+            source: { kind: 'tool', callId: 'c1' },
+            content: [{ type: 'tool-result', content: contents.flat() }],
+          },
+        },
+      },
+    ],
+  })
+}
+
+function makeHarness(harness: { sessionApi?: SessionApi; agent?: FakeAgent } = {}) {
   const mounts: string[] = []
   const sections: Array<{ name: string; order: number; text: string }> = []
   const disposed: string[] = []
@@ -115,7 +273,7 @@ function makeHarness() {
           setup?: (agentCtx: unknown) => Promise<void>
         }) => {
           created.push({ sessionId: options.sessionId })
-          const agent = makeAgent()
+          const agent = harness.agent ?? makeAgent({ sessionApi: harness.sessionApi })
           agent.session.id = options.sessionId
           if (options.agentOptions) agent.options = options.agentOptions
           if (options.setup) await options.setup({ systemPrompt: { section } })
@@ -135,7 +293,7 @@ function makeHarness() {
           agentOptions?: { provider: string; model: string }
           setup?: (agentCtx: unknown) => Promise<void>
         }) => {
-          const agent = makeAgent()
+          const agent = harness.agent ?? makeAgent({ sessionApi: harness.sessionApi })
           agent.session.id = options.resumeSessionId
           if (options.agentOptions) agent.options = options.agentOptions
           if (options.setup) await options.setup({ systemPrompt: { section } })
@@ -578,9 +736,14 @@ describe('AgentPool', () => {
     // their own row; mismatched cwds create nothing.
     expect(create).toHaveBeenCalledTimes(3)
     const paths = create.mock.calls.map((call) => call[0])
-    expect(paths[0]).toMatch(/^\/tmp\/wecom-test\/WeCom-.+-\d{4}-\d{6}-abcdef$/)
-    expect(paths[1]).toMatch(/^\/tmp\/wecom-test\/WeCom-.+-\d{4}-\d{6}-def~g2$/)
-    expect(paths[2]).toMatch(/^\/tmp\/wecom-test\/WeCom-.+-\d{4}-\d{6}-xyz789$/)
+    // The row's canonical cwd IS the session's recorded cwd: a resumed session
+    // runs where the harness stored it, so the workspace must not mint a second
+    // name for it (that mismatch is what broke the sandbox cwd).
+    expect(paths).toEqual([
+      '/tmp/wecom-test/WeCom-u1-0821-abcdef',
+      '/tmp/wecom-test/WeCom-u1-0821-def~g2',
+      '/tmp/wecom-test/WeCom-grp-0821-xyz789',
+    ])
   })
 
   it('a failing attach never fails the message itself', async () => {
@@ -935,6 +1098,96 @@ describe('AgentPool', () => {
     ])
   })
 
+  it('does not ship an image that read_image handed back to the model', async () => {
+    const { ctx } = makeHarness({ agent: makeImageTurn('read_image', 'sha256:user-upload') })
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+
+    const reply = await manager.handle(singleMessage('这是什么'), noopDownload)
+
+    // The user's own upload is not a card: it must not be echoed back.
+    expect(reply.images).toBeUndefined()
+    // The call itself still shows up in the activity summary.
+    expect(reply.toolCalls?.map((call) => call.name)).toEqual(['read_image'])
+  })
+
+  it('still ships an image a card tool rendered', async () => {
+    const { ctx } = makeHarness({ agent: makeImageTurn('render_card', 'card-1') })
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+
+    const reply = await manager.handle(singleMessage('画个图'), noopDownload)
+
+    expect(reply.images).toHaveLength(1)
+    expect(reply.images?.[0]?.attachmentId).toBe('card-1')
+  })
+
+  it('does not ship an image read_image produced inside run_code (PTC)', async () => {
+    const { ctx } = makeHarness({
+      agent: makePtcImageTurn([{ name: 'read_image', attachmentId: 'sha256:user-upload' }]),
+    })
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+
+    const reply = await manager.handle(singleMessage('这是什么'), noopDownload)
+
+    // The outer result is named `run_code`; the reader is only visible on the
+    // sub-dispatch, which must still keep the user's own picture out of the chat.
+    expect(reply.images).toBeUndefined()
+  })
+
+  it('still ships an image a card tool rendered inside run_code (PTC)', async () => {
+    const { ctx } = makeHarness({
+      agent: makePtcImageTurn([{ name: 'render_card', attachmentId: 'card-2' }]),
+    })
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+
+    const reply = await manager.handle(singleMessage('画个图'), noopDownload)
+
+    expect(reply.images?.map((ref) => ref.attachmentId)).toEqual(['card-2'])
+  })
+
+  it('ships a rendered image even when read_image returns the same attachment inside run_code', async () => {
+    const { ctx } = makeHarness({
+      agent: makePtcImageTurn([
+        { name: 'render_card', attachmentId: 'shared-image' },
+        { name: 'read_image', attachmentId: 'shared-image' },
+      ]),
+    })
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+
+    const reply = await manager.handle(singleMessage('画图并检查'), noopDownload)
+
+    expect(reply.images?.map((ref) => ref.attachmentId)).toEqual(['shared-image'])
+  })
+
+  it('recognizes the legacy tool/code-dispatch event name', async () => {
+    const { ctx } = makeHarness({
+      agent: makePtcImageTurn(
+        [{ name: 'read_image', attachmentId: 'sha256:user-upload' }],
+        'tool/code-dispatch',
+      ),
+    })
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+
+    const reply = await manager.handle(singleMessage('这是什么'), noopDownload)
+
+    expect(reply.images).toBeUndefined()
+  })
+
+  it('falls back to the outer run_code result when no sub-dispatch event is available', async () => {
+    const { ctx } = makeHarness({ agent: makeImageTurn('run_code', 'compat-card') })
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+
+    const reply = await manager.handle(singleMessage('画个图'), noopDownload)
+
+    expect(reply.images?.map((ref) => ref.attachmentId)).toEqual(['compat-card'])
+  })
+
   it('adopts a live session instead of trying to resume it again', async () => {
     const liveAgent = makeAgent()
     const resume = vi.fn()
@@ -1097,5 +1350,235 @@ describe('AgentPool', () => {
         'Compaction is unavailable because this process has an active compaction, or the agent is not idle.',
       )
     })
+  })
+})
+
+/**
+ * dsh-session 0.1.5-rc.x removed the `events` getter that 0.1.0-rc.x exposed
+ * (`snapshotEvents()` / `ownEvents()` / `eventAt()` replaced it). The pool reads
+ * the log on every turn, so the whole feature died on that upgrade — commands
+ * kept working because they never open a session.
+ */
+describe('AgentPool on the dsh-session 0.1.5 session API', () => {
+  it('drives a turn and extracts its reply without an `events` getter', async () => {
+    const { ctx, live, created } = makeHarness({ sessionApi: 'snapshot' })
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+
+    await expect(manager.handle(singleMessage('hi'), noopDownload)).resolves.toMatchObject({
+      text: 'Harness reply',
+    })
+
+    // Guard: the double must really look like 0.1.5, or this test proves nothing.
+    const agent = live.get(created[0]?.sessionId ?? '') as FakeAgent | undefined
+    expect(agent).toBeDefined()
+    const session = agent?.session as { events?: unknown } | undefined
+    expect(session?.events).toBeUndefined()
+  })
+
+  it('reverts a manual rename using the snapshot log', async () => {
+    const renamed: string[] = []
+    const { ctx, fireSessionEvent } = makeHarness({ sessionApi: 'snapshot' })
+    ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+      name === 'sessionTitle'
+        ? { rename: vi.fn((_session: unknown, title: string) => renamed.push(title)) }
+        : undefined,
+    )
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+
+    // The pool has no canonical title for this session yet, so it falls back to
+    // the previous `session/title` in the log (pool.previousTitle).
+    const log: unknown[] = [
+      {
+        type: 'session/title',
+        seq: 3,
+        data: { title: '性能优化', messageSeqs: [], source: { kind: 'provider' } },
+      },
+    ]
+    const session = fakeSession(log, 'dsh-wecom-single-snapshot', 'snapshot')
+    const rename = {
+      type: 'session/title',
+      seq: 4,
+      data: { title: '手动改名', messageSeqs: [], source: { kind: 'user' } },
+    }
+    log.push(rename)
+    fireSessionEvent(session, rename)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(renamed).toEqual(['性能优化'])
+  })
+
+  it('streams agent/assistant-stream frames instead of assistant/chunk events', async () => {
+    const deltas: Array<{ kind: string; text: string }> = []
+    const agent = makeAgent({
+      sessionApi: 'snapshot',
+      frames: [
+        { type: 'start', attemptId: 'a1', revision: 1, turn: 1, step: 1 },
+        {
+          type: 'chunk',
+          attemptId: 'a1',
+          revision: 2,
+          index: 0,
+          chunk: { type: 'text-delta', index: 0, text: 'Hel' },
+        },
+        {
+          type: 'chunk',
+          attemptId: 'a1',
+          revision: 3,
+          index: 1,
+          chunk: { type: 'text-delta', index: 0, text: 'lo' },
+        },
+        {
+          type: 'chunk',
+          attemptId: 'a1',
+          revision: 4,
+          index: 2,
+          chunk: { type: 'reasoning-delta', index: 1, text: '想一下' },
+        },
+        {
+          type: 'end',
+          attemptId: 'a1',
+          revision: 5,
+          index: 3,
+          outcome: { kind: 'committed', eventType: 'assistant/message' },
+        },
+      ],
+    })
+    const { ctx } = makeHarness({ agent })
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+
+    const reply = await manager.handle(singleMessage(), noopDownload, (delta) => deltas.push(delta))
+
+    expect(deltas).toEqual([
+      { kind: 'text', text: 'Hel' },
+      { kind: 'text', text: 'lo' },
+      { kind: 'reasoning', text: '想一下' },
+    ])
+    expect(reply.text).toBe('Harness reply')
+    expect(reply.reasoning).toBe('想一下')
+  })
+
+  it('keeps a turn alive on transient frames alone (no-progress timeout)', async () => {
+    const agent = makeAgent({ hang: true, sessionApi: 'snapshot' })
+    const { ctx } = makeHarness({ agent })
+    const manager = new AgentPool(ctx as never, testConfig({ turnTimeoutMs: 40 }))
+    await manager.start()
+
+    const turn = manager.handle(singleMessage('hi'), noopDownload)
+    // Five 20ms beats: twice the timeout in total, but every frame resets it.
+    for (let beat = 0; beat < 5; beat += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      agent.fire('agent/assistant-stream', {
+        agent,
+        frame: { type: 'chunk', chunk: { type: 'text-delta', index: 0, text: 'x' } },
+      })
+    }
+    agent.release()
+
+    await expect(turn).resolves.toMatchObject({ text: 'Harness reply' })
+    expect(agent.cancel).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * Directory names are minted from the clock, so recomputing one mid-create can
+ * straddle a second boundary: the session then records a cwd that the workspace
+ * `mkdir` never created, and every tool spawn in that session fails ENOENT.
+ */
+describe('AgentPool workspace identity', () => {
+  it('keeps the session cwd and the workspace path identical when the clock ticks mid-create', async () => {
+    vi.useFakeTimers()
+    // Own workspace root: this test mints (and could leave) real directories.
+    const root = mkdtempSync(join(tmpdir(), 'wecom-ws-'))
+    try {
+      vi.setSystemTime(new Date('2026-09-11T08:14:27Z'))
+      const { ctx, created } = makeHarness()
+      const create = ctx.agents.create as ReturnType<typeof vi.fn>
+      const inner = create.getMockImplementation()
+      expect(inner).toBeDefined()
+      // Cross a second boundary while the harness creates the session.
+      create.mockImplementation(async (options: never) => {
+        vi.advanceTimersByTime(1_500)
+        return inner?.(options)
+      })
+      const paths: string[] = []
+      ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+        name === 'workspaceRegistry'
+          ? {
+              create: vi.fn(async (path: string) => {
+                paths.push(path)
+                return { attachSession: vi.fn(async () => undefined) }
+              }),
+            }
+          : undefined,
+      )
+      const manager = new AgentPool(ctx as never, testConfig({ cwd: root }))
+      await manager.start()
+
+      await manager.handle(singleMessage('hi'), noopDownload)
+
+      expect(created).toHaveLength(1)
+      const passed = create.mock.calls[0]?.[0] as { meta?: { cwd?: string } } | undefined
+      const sessionCwd = passed?.meta?.cwd
+      expect(sessionCwd).toBeDefined()
+      expect(paths).toContain(sessionCwd)
+    } finally {
+      vi.useRealTimers()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('repairs a persisted session whose recorded cwd is missing', async () => {
+    // Own workspace root: the repaired directory must not leak into the
+    // shared test cwd, where the adoption lookup would later find it.
+    const root = mkdtempSync(join(tmpdir(), 'wecom-repair-'))
+    try {
+      const base = conversationId(testConfig().namespace, singleMessage('hi') as never)
+      const cwd = join(root, `WeCom-u1-0911-161427-${base.slice(-6)}`)
+      const { ctx } = makeHarness()
+      ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue([
+        { id: base, cwd },
+      ])
+      const manager = new AgentPool(ctx as never, testConfig({ cwd: root }))
+      await manager.start()
+      expect(existsSync(cwd)).toBe(false)
+
+      await manager.handle(singleMessage('hi'), noopDownload)
+
+      // dsh resumed the session where it was recorded, so that directory must exist.
+      expect(ctx.agents.resume).toHaveBeenCalled()
+      expect(existsSync(cwd)).toBe(true)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('recognizes persisted sessions listed as 0.1.5 snapshot wrappers', async () => {
+    // 0.1.5-rc.x returns `{ header, revision, sizeBytes }` from list(); reading
+    // `entry.id` left `persisted` empty and every restart re-created (and thus
+    // failed on) sessions that already had a log.
+    const root = mkdtempSync(join(tmpdir(), 'wecom-snapshot-'))
+    try {
+      const base = conversationId(testConfig().namespace, singleMessage('hi') as never)
+      const cwd = join(root, `WeCom-u1-0911-161427-${base.slice(-6)}`)
+      const { ctx } = makeHarness()
+      ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue([
+        { header: { id: base, cwd }, revision: 'r1', sizeBytes: 42 },
+      ])
+      const manager = new AgentPool(ctx as never, testConfig({ cwd: root }))
+      await manager.start()
+
+      await manager.handle(singleMessage('hi'), noopDownload)
+
+      // Resumed as a known session (never re-created)…
+      expect(ctx.agents.resume).toHaveBeenCalled()
+      expect(ctx.agents.create).not.toHaveBeenCalled()
+      // …and its recorded cwd is both honoured and repaired.
+      expect(existsSync(cwd)).toBe(true)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })
