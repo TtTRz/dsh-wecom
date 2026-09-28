@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-09-28
+
+### Fixed
+
+- Restore `/session`, `/current`, and `/resume` on Harness 0.1.7-rc.2 by
+  normalizing both legacy session headers and the newer persistence snapshots.
+- Preserve stored working directories during startup and resume existing
+  sessions instead of treating them as missing. `/new` observes the highest
+  stored epoch even when another driver created it after startup.
+- Read cold session logs with `open(..., 'read')` on the current API, release
+  handles after success or failure, and retain the legacy `inspect()` path.
+- Normalize snapshot entries in the legacy status-route helper as well.
+
+### Tests
+
+- Run history command regressions against both persistence shapes and verify
+  read-handle cleanup on failures and cancellation.
+- Add a CI smoke test using the real rc.2 JSONL backend and temporary sessions,
+  covering cold titles, workspace regrouping, routing across restarts, and
+  epoch allocation without connecting to WeCom or calling a model.
+- Bound the persistence peer declaration to the two covered API releases.
+
 ## [0.5.2] - 2026-09-28
 
 ### Changed

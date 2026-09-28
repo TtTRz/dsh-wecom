@@ -271,7 +271,9 @@ describe('AgentPool', () => {
     // The routed session materialized after start (another driver, or a prior
     // process). Trusting the startup snapshot alone used to call create() on it
     // and throw 'session "..." already exists' on EVERY later message.
-    ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue([{ id: base }])
+    ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { header: { id: base } },
+    ])
 
     await manager.handle(singleMessage(), noopDownload)
 
@@ -339,7 +341,7 @@ describe('AgentPool', () => {
     await manager.start()
 
     ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue([
-      { id: `${base}~g3` },
+      { header: { id: `${base}~g3` } },
     ])
 
     const epoch = await manager.forget(singleMessage('new'))
@@ -461,213 +463,251 @@ describe('AgentPool', () => {
     expect(manager.selectionFor(bare as never).current).toBeUndefined()
   })
 
-  describe('session history commands', () => {
-    const T0 = 1_700_000_000_000
-    const T1 = 1_700_100_000_000
-    const T2 = 1_700_200_000_000
+  describe.each(['legacy headers', 'rc.2 snapshots'])(
+    'session history commands (%s)',
+    (contract) => {
+      const T0 = 1_700_000_000_000
+      const T1 = 1_700_100_000_000
+      const T2 = 1_700_200_000_000
 
-    /** Headers for a chat with the base session plus two /new epochs. */
-    function chatHeaders(base: string) {
-      return [
-        { id: base, createdAt: T0 },
-        { id: `${base}~g1`, createdAt: T1 },
-        { id: `${base}~g2`, createdAt: T2 },
-        // Another chat's session and a web session must never leak in.
-        { id: 'dsh-wecom-single-otherchat', createdAt: T2 },
-        { id: 'session-web', createdAt: T2 },
-      ]
-    }
-
-    function inspectFor(titles: Record<string, string | undefined>) {
-      return vi.fn(async (id: string) => ({
-        meta: { id },
-        events:
-          titles[id] === undefined
-            ? []
-            : [{ type: 'session/title', seq: 2, data: { title: titles[id] } }],
-      }))
-    }
-
-    it("lists the chat's own sessions newest-first with title and turns", async () => {
-      const base = conversationId('default', singleMessage())
-      const { ctx, live, fireSessionEvent } = makeHarness()
-      ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue(
-        chatHeaders(base),
-      )
-      const manager = new AgentPool(ctx as never, testConfig())
-      await manager.start()
-      await manager.handle(singleMessage('one'), noopDownload)
-      // The chat's base id is persisted, so the turn resumes the live base
-      // agent (not create). Feed the pool's canonical-title watcher through its
-      // public session/event seam (the turn's own watcher is gone after settle).
-      const agent = live.get(base) as FakeAgent
-      const titleEvent: { type: string; seq: number; data: { title: string } } = {
-        type: 'session/title',
-        seq: 2,
-        data: { title: '当前话题' },
+      /** Headers for a chat with the base session plus two /new epochs. */
+      function chatHeaders(base: string) {
+        const headers = [
+          { id: base, createdAt: T0 },
+          { id: `${base}~g1`, createdAt: T1 },
+          { id: `${base}~g2`, createdAt: T2 },
+          // Another chat's session and a web session must never leak in.
+          { id: 'dsh-wecom-single-otherchat', createdAt: T2 },
+          { id: 'session-web', createdAt: T2 },
+        ]
+        return contract === 'rc.2 snapshots'
+          ? headers.map((header) => ({ header, revision: 'test-revision' }))
+          : headers
       }
-      agent.session.events.push(titleEvent)
-      fireSessionEvent(agent.session, titleEvent)
-      ;(ctx.sessionPersistence as Record<string, unknown>).inspect = inspectFor({
-        [`${base}~g1`]: '旧话题一',
-        [`${base}~g2`]: '旧话题二',
-      }) as never
 
-      const views = await manager.listSessions(singleMessage())
-
-      expect(views.map((v) => v.sessionId)).toEqual([`${base}~g2`, `${base}~g1`, base])
-      expect(views.map((v) => v.epoch)).toEqual([2, 1, 0])
-      expect(views[2]).toMatchObject({ current: true, title: '当前话题', turns: 1, createdAt: T0 })
-      expect(views[1]).toMatchObject({ current: false, title: '旧话题一', createdAt: T1 })
-      expect(views[0]).toMatchObject({ current: false, title: '旧话题二', createdAt: T2 })
-    })
-
-    it('degrades to no title and null turns when the log cannot be inspected', async () => {
-      const base = conversationId('default', singleMessage())
-      const { ctx } = makeHarness()
-      ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue(
-        chatHeaders(base),
-      )(ctx.sessionPersistence as Record<string, unknown>).inspect = vi.fn(async () => {
-        throw new Error('corrupt log')
-      }) as never
-      const manager = new AgentPool(ctx as never, testConfig())
-      await manager.start()
-
-      const views = await manager.listSessions(singleMessage())
-
-      expect(views).toHaveLength(3)
-      for (const view of views) {
-        expect(view.title).toBeUndefined()
-        expect(view.turns).toBeNull()
+      function inspectFor(titles: Record<string, string | undefined>) {
+        return vi.fn(async (id: string) => ({
+          meta: { id },
+          events:
+            titles[id] === undefined
+              ? []
+              : [{ type: 'session/title', seq: 2, data: { title: titles[id] } }],
+        }))
       }
-    })
 
-    it('shows the current session (from the live log) or nothing before the first message', async () => {
-      const base = conversationId('default', singleMessage())
-      const { ctx, live, fireSessionEvent } = makeHarness()
-      ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue([
-        { id: base, createdAt: T0 },
-      ])
-      const manager = new AgentPool(ctx as never, testConfig())
-      await manager.start()
-
-      // The base id is persisted, so the turn resumes the live base agent
-      // (it already logged one turn/end).
-      await manager.handle(singleMessage('one'), noopDownload)
-      const agent = live.get(base) as FakeAgent
-      const titleEvent: { type: string; seq: number; data: { title: string } } = {
-        type: 'session/title',
-        seq: 2,
-        data: { title: '当前话题' },
+      function installLogReader(
+        ctx: ReturnType<typeof makeHarness>['ctx'],
+        inspect: ReturnType<typeof vi.fn>,
+      ) {
+        if (contract === 'rc.2 snapshots') {
+          Object.assign(ctx.sessionPersistence, {
+            open: vi.fn(async (id: string) => ({
+              read: () => inspect(id),
+              close: vi.fn(async () => undefined),
+            })),
+          })
+        } else {
+          Object.assign(ctx.sessionPersistence, { inspect })
+        }
       }
-      agent.session.events.push(titleEvent)
-      fireSessionEvent(agent.session, titleEvent)
 
-      const view = await manager.currentSession(singleMessage())
-      expect(view).toMatchObject({ epoch: 0, current: true, title: '当前话题', turns: 1 })
+      it("lists the chat's own sessions newest-first with title and turns", async () => {
+        const base = conversationId('default', singleMessage())
+        const { ctx, live, fireSessionEvent } = makeHarness()
+        ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue(
+          chatHeaders(base),
+        )
+        const manager = new AgentPool(ctx as never, testConfig())
+        await manager.start()
+        await manager.handle(singleMessage('one'), noopDownload)
+        // The chat's base id is persisted, so the turn resumes the live base
+        // agent (not create). Feed the pool's canonical-title watcher through its
+        // public session/event seam (the turn's own watcher is gone after settle).
+        const agent = live.get(base) as FakeAgent
+        const titleEvent: { type: string; seq: number; data: { title: string } } = {
+          type: 'session/title',
+          seq: 2,
+          data: { title: '当前话题' },
+        }
+        agent.session.events.push(titleEvent)
+        fireSessionEvent(agent.session, titleEvent)
+        installLogReader(
+          ctx,
+          inspectFor({
+            [`${base}~g1`]: '旧话题一',
+            [`${base}~g2`]: '旧话题二',
+          }),
+        )
 
-      // A chat whose routed session is not persisted yet resolves to undefined.
-      ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue([])
-      await expect(manager.currentSession(singleMessage())).resolves.toBeUndefined()
-    })
+        const views = await manager.listSessions(singleMessage())
 
-    it('resumes an older epoch and routes the next message to it', async () => {
-      const base = conversationId('default', singleMessage())
-      const { ctx, live } = makeHarness()
-      ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue(
-        chatHeaders(base),
-      )
-      const manager = new AgentPool(ctx as never, testConfig())
-      await manager.start()
-      // Simulate: the chat had /new'd twice, so routing sits on epoch 2.
-      ;(manager as unknown as { epochs: Map<string, number> }).epochs.set(base, 2)
+        expect(views.map((v) => v.sessionId)).toEqual([`${base}~g2`, `${base}~g1`, base])
+        expect(views.map((v) => v.epoch)).toEqual([2, 1, 0])
+        expect(views[2]).toMatchObject({
+          current: true,
+          title: '当前话题',
+          turns: 1,
+          createdAt: T0,
+        })
+        expect(views[1]).toMatchObject({ current: false, title: '旧话题一', createdAt: T1 })
+        expect(views[0]).toMatchObject({ current: false, title: '旧话题二', createdAt: T2 })
+      })
 
-      const text = await manager.resumeSession(singleMessage(), '1')
-      expect(text).toContain('#1')
+      it('degrades to no title and null turns when the log cannot be inspected', async () => {
+        const base = conversationId('default', singleMessage())
+        const { ctx } = makeHarness()
+        ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue(
+          chatHeaders(base),
+        )
+        installLogReader(
+          ctx,
+          vi.fn(async () => {
+            throw new Error('corrupt log')
+          }),
+        )
+        const manager = new AgentPool(ctx as never, testConfig())
+        await manager.start()
 
-      await manager.handle(singleMessage('continued'), noopDownload)
-      // Resumed (not re-created): the agent comes from persistence…
-      expect(ctx.agents.resume).toHaveBeenCalledWith(
-        expect.objectContaining({ resumeSessionId: `${base}~g1` }),
-      )
-      // …and the live registry now routes the chat to epoch 1.
-      expect([...live.keys()]).toContain(`${base}~g1`)
-    })
+        const views = await manager.listSessions(singleMessage())
 
-    it('reports the already-current epoch, missing epochs, bad input, and archived sessions', async () => {
-      const base = conversationId('default', singleMessage())
-      const { ctx } = makeHarness()
-      ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue(
-        chatHeaders(base),
-      )
-      const manager = new AgentPool(ctx as never, testConfig())
-      await manager.start()
+        expect(views).toHaveLength(3)
+        for (const view of views) {
+          expect(view.title).toBeUndefined()
+          expect(view.turns).toBeNull()
+        }
+      })
 
-      // No argument / garbage argument → usage hint, no routing change.
-      expect(await manager.resumeSession(singleMessage(), '')).toContain('/resume <编号>')
-      expect(await manager.resumeSession(singleMessage(), 'x')).toContain('/resume <编号>')
-      // Already on epoch 0 (default).
-      expect(await manager.resumeSession(singleMessage(), '0')).toContain('当前就是 session #0')
-      // Epoch 9 was never minted.
-      expect(await manager.resumeSession(singleMessage(), '9')).toContain('没有编号为 9')
-      // Routing is still epoch 0 after the failures above.
-      expect((manager as unknown as { epochs: Map<string, number> }).epochs.get(base) ?? 0).toBe(0)
+      it('shows the current session (from the live log) or nothing before the first message', async () => {
+        const base = conversationId('default', singleMessage())
+        const { ctx, live, fireSessionEvent } = makeHarness()
+        ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue([
+          chatHeaders(base)[0],
+        ])
+        const manager = new AgentPool(ctx as never, testConfig())
+        await manager.start()
 
-      // An archived session may not be resumed (the pool would skip it anyway).
-      ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
-        name === 'workspaceRegistry' ? { archivedSessionIds: [`${base}~g1`] } : undefined,
-      )
-      expect(await manager.resumeSession(singleMessage(), '1')).toContain('归档')
-      expect((manager as unknown as { epochs: Map<string, number> }).epochs.get(base) ?? 0).toBe(0)
-    })
+        // The base id is persisted, so the turn resumes the live base agent
+        // (it already logged one turn/end).
+        await manager.handle(singleMessage('one'), noopDownload)
+        const agent = live.get(base) as FakeAgent
+        const titleEvent: { type: string; seq: number; data: { title: string } } = {
+          type: 'session/title',
+          seq: 2,
+          data: { title: '当前话题' },
+        }
+        agent.session.events.push(titleEvent)
+        fireSessionEvent(agent.session, titleEvent)
 
-    it('survives a restart: a resumed epoch keeps routing after the process reloads', async () => {
-      const base = conversationId('default', singleMessage())
-      const firstCtx = makeHarness().ctx
-      ;(firstCtx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue(
-        chatHeaders(base),
-      )
-      const first = new AgentPool(firstCtx as never, testConfig())
-      await first.start()
-      ;(first as unknown as { epochs: Map<string, number> }).epochs.set(base, 2)
-      await first.resumeSession(singleMessage(), '1')
-      await first.dispose()
+        const view = await manager.currentSession(singleMessage())
+        expect(view).toMatchObject({ epoch: 0, current: true, title: '当前话题', turns: 1 })
 
-      // New pool (fresh process): the epoch comes back from the state file.
-      const { ctx: ctx2, created: created2 } = makeHarness()
-      ;(ctx2.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue(
-        chatHeaders(base),
-      )
-      const second = new AgentPool(ctx2 as never, testConfig())
-      await second.start()
-      await second.handle(singleMessage('continued'), noopDownload)
-      // Epoch 1 already exists on disk, so it is resumed — not re-created.
-      expect(created2).toHaveLength(0)
-      expect(ctx2.agents.resume).toHaveBeenCalledWith(
-        expect.objectContaining({ resumeSessionId: `${base}~g1` }),
-      )
-      await second.dispose()
-    })
+        // A chat whose routed session is not persisted yet resolves to undefined.
+        ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue([])
+        await expect(manager.currentSession(singleMessage())).resolves.toBeUndefined()
+      })
 
-    it('/new after a rewind mints a fresh epoch instead of colliding with an existing session', async () => {
-      const base = conversationId('default', singleMessage())
-      const { ctx, created } = makeHarness()
-      ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue(
-        chatHeaders(base),
-      )
-      const manager = new AgentPool(ctx as never, testConfig())
-      await manager.start()
-      ;(manager as unknown as { epochs: Map<string, number> }).epochs.set(base, 2)
-      // Rewind to the original session, then /new — a naive "current + 1"
-      // would reopen ~g1 with its old history.
-      await manager.resumeSession(singleMessage(), '0')
-      const next = await manager.forget(singleMessage('new'))
-      expect(next).toBe(3)
+      it('resumes an older epoch and routes the next message to it', async () => {
+        const base = conversationId('default', singleMessage())
+        const { ctx, live } = makeHarness()
+        ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue(
+          chatHeaders(base),
+        )
+        const manager = new AgentPool(ctx as never, testConfig())
+        await manager.start()
+        // Simulate: the chat had /new'd twice, so routing sits on epoch 2.
+        ;(manager as unknown as { epochs: Map<string, number> }).epochs.set(base, 2)
 
-      await manager.handle(singleMessage('fresh'), noopDownload)
-      expect(created.at(-1)?.sessionId).toBe(`${base}~g3`)
-    })
-  })
+        const text = await manager.resumeSession(singleMessage(), '1')
+        expect(text).toContain('#1')
+
+        await manager.handle(singleMessage('continued'), noopDownload)
+        // Resumed (not re-created): the agent comes from persistence…
+        expect(ctx.agents.resume).toHaveBeenCalledWith(
+          expect.objectContaining({ resumeSessionId: `${base}~g1` }),
+        )
+        // …and the live registry now routes the chat to epoch 1.
+        expect([...live.keys()]).toContain(`${base}~g1`)
+      })
+
+      it('reports the already-current epoch, missing epochs, bad input, and archived sessions', async () => {
+        const base = conversationId('default', singleMessage())
+        const { ctx } = makeHarness()
+        ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue(
+          chatHeaders(base),
+        )
+        const manager = new AgentPool(ctx as never, testConfig())
+        await manager.start()
+
+        // No argument / garbage argument → usage hint, no routing change.
+        expect(await manager.resumeSession(singleMessage(), '')).toContain('/resume <编号>')
+        expect(await manager.resumeSession(singleMessage(), 'x')).toContain('/resume <编号>')
+        // Already on epoch 0 (default).
+        expect(await manager.resumeSession(singleMessage(), '0')).toContain('当前就是 session #0')
+        // Epoch 9 was never minted.
+        expect(await manager.resumeSession(singleMessage(), '9')).toContain('没有编号为 9')
+        // Routing is still epoch 0 after the failures above.
+        expect((manager as unknown as { epochs: Map<string, number> }).epochs.get(base) ?? 0).toBe(
+          0,
+        )
+
+        // An archived session may not be resumed (the pool would skip it anyway).
+        ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+          name === 'workspaceRegistry' ? { archivedSessionIds: [`${base}~g1`] } : undefined,
+        )
+        expect(await manager.resumeSession(singleMessage(), '1')).toContain('归档')
+        expect((manager as unknown as { epochs: Map<string, number> }).epochs.get(base) ?? 0).toBe(
+          0,
+        )
+      })
+
+      it('survives a restart: a resumed epoch keeps routing after the process reloads', async () => {
+        const base = conversationId('default', singleMessage())
+        const firstCtx = makeHarness().ctx
+        ;(firstCtx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue(
+          chatHeaders(base),
+        )
+        const first = new AgentPool(firstCtx as never, testConfig())
+        await first.start()
+        ;(first as unknown as { epochs: Map<string, number> }).epochs.set(base, 2)
+        await first.resumeSession(singleMessage(), '1')
+        await first.dispose()
+
+        // New pool (fresh process): the epoch comes back from the state file.
+        const { ctx: ctx2, created: created2 } = makeHarness()
+        ;(ctx2.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue(
+          chatHeaders(base),
+        )
+        const second = new AgentPool(ctx2 as never, testConfig())
+        await second.start()
+        await second.handle(singleMessage('continued'), noopDownload)
+        // Epoch 1 already exists on disk, so it is resumed — not re-created.
+        expect(created2).toHaveLength(0)
+        expect(ctx2.agents.resume).toHaveBeenCalledWith(
+          expect.objectContaining({ resumeSessionId: `${base}~g1` }),
+        )
+        await second.dispose()
+      })
+
+      it('/new after a rewind mints a fresh epoch instead of colliding with an existing session', async () => {
+        const base = conversationId('default', singleMessage())
+        const { ctx, created } = makeHarness()
+        ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue(
+          chatHeaders(base),
+        )
+        const manager = new AgentPool(ctx as never, testConfig())
+        await manager.start()
+        ;(manager as unknown as { epochs: Map<string, number> }).epochs.set(base, 2)
+        // Rewind to the original session, then /new — a naive "current + 1"
+        // would reopen ~g1 with its old history.
+        await manager.resumeSession(singleMessage(), '0')
+        const next = await manager.forget(singleMessage('new'))
+        expect(next).toBe(3)
+
+        await manager.handle(singleMessage('fresh'), noopDownload)
+        expect(created.at(-1)?.sessionId).toBe(`${base}~g3`)
+      })
+    },
+  )
 
   it('cancels the turn on response timeout', async () => {
     const hanging = makeAgent({ hang: true })
@@ -1026,21 +1066,23 @@ describe('AgentPool', () => {
       path,
     }))
     const { ctx } = makeHarness()
-    ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue([
-      // New-layout session: stored cwd equals its per-chat directory.
-      { id: 'dsh-wecom-single-000abcdef', cwd: '/tmp/wecom-test/WeCom-u1-0821-abcdef' },
-      // Epoch session of the same chat shares the base dir, so it re-attaches
-      // to the SAME workspace row instead of minting a new one.
-      { id: 'dsh-wecom-single-000abcdef~g2', cwd: '/tmp/wecom-test/WeCom-u1-0821-def~g2' },
-      // New-layout group chat.
-      { id: 'dsh-wecom-group-000xyz789', cwd: '/tmp/wecom-test/WeCom-grp-0821-xyz789' },
-      // Legacy session under the shared base: must NOT create a per-chat row.
-      { id: 'dsh-wecom-single-000legacy', cwd: '/tmp/wecom-test' },
-      // Pre-fix epoch dir: stored cwd is the epoch-id directory, which no
-      // longer equals the (now base-id) conversation dir — skip, no new row.
-      { id: 'dsh-wecom-single-000old~g1', cwd: '/tmp/wecom-test/WeCom-old-0821-00old' },
-      { id: 'session-other' },
-    ])
+    ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue(
+      [
+        // New-layout session: stored cwd equals its per-chat directory.
+        { id: 'dsh-wecom-single-000abcdef', cwd: '/tmp/wecom-test/WeCom-u1-0821-abcdef' },
+        // Epoch session of the same chat shares the base dir, so it re-attaches
+        // to the SAME workspace row instead of minting a new one.
+        { id: 'dsh-wecom-single-000abcdef~g2', cwd: '/tmp/wecom-test/WeCom-u1-0821-def~g2' },
+        // New-layout group chat.
+        { id: 'dsh-wecom-group-000xyz789', cwd: '/tmp/wecom-test/WeCom-grp-0821-xyz789' },
+        // Legacy session under the shared base: must NOT create a per-chat row.
+        { id: 'dsh-wecom-single-000legacy', cwd: '/tmp/wecom-test' },
+        // Pre-fix epoch dir: stored cwd is the epoch-id directory, which no
+        // longer equals the (now base-id) conversation dir — skip, no new row.
+        { id: 'dsh-wecom-single-000old~g1', cwd: '/tmp/wecom-test/WeCom-old-0821-00old' },
+        { id: 'session-other' },
+      ].map((header) => ({ header, revision: 'test-revision' })),
+    )
     ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
       name === 'workspaceRegistry' ? { create } : undefined,
     )

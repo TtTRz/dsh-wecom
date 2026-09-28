@@ -42,7 +42,7 @@ dsh web
 
 ```sh
 dsh plugin --profile web add dsh-wecom          # 最新版
-dsh plugin --profile web add dsh-wecom@0.5.2    # 锁定版本
+dsh plugin --profile web add dsh-wecom@0.5.3    # 锁定版本
 ```
 
 升级同理：`dsh plugin --profile web add dsh-wecom@<新版本>`。装好后配置
@@ -52,10 +52,14 @@ dsh plugin --profile web add dsh-wecom@0.5.2    # 锁定版本
 
 ### 从 0.3.x 升级
 
-0.5.2 包含 0.5.0–0.5.1 的历史会话切换、流式回复和图片卡片投递修复。
+0.5.3 包含 0.5.0–0.5.1 的历史会话切换、流式回复和图片卡片投递修复。
 渠道插件现在提供状态与重连服务，不再自带浏览器状态面板、机器人管理界面或
 `/api/wecom/*` 路由。需要这些界面时，请使用独立的面板集成。
 升级时保持机器人的 `namespace` 和工作目录不变，以保留会话路由和持久化历史。
+
+Harness 0.1.7-rc.2 请使用 0.5.3 或更新版本：0.5.2 仍按旧持久化接口读取，
+可能导致历史列表为空。本次覆盖持久化 API 的 `0.1.0-rc.6` 和 `0.1.7-rc.2`；
+rc.2 的 CI 使用真实 JSONL 后端验证，不连接企微、不调用模型。
 
 ## 📦 从源码安装
 
@@ -70,8 +74,8 @@ dsh plugin --profile web add github:TtTRz/dsh-wecom#<sha>
 ```sh
 git clone https://github.com/TtTRz/dsh-wecom && cd dsh-wecom
 npm install --legacy-peer-deps
-npm pack                              # 产出 dsh-wecom-0.5.2.tgz
-dsh plugin --profile web add ./dsh-wecom-0.5.2.tgz
+npm pack                              # 产出 dsh-wecom-0.5.3.tgz
+dsh plugin --profile web add ./dsh-wecom-0.5.3.tgz
 ```
 
 本地目录：`dsh plugin --profile web add /绝对路径/dsh-wecom`（链接源码；先执行 `npm install --legacy-peer-deps && npm run build` 产出 `dist/`）。
@@ -182,6 +186,10 @@ dsh-wecom（host 插件）
 ```sh
 npm install --legacy-peer-deps
 npm run check   # biome + typecheck + test + build
+
+# 在独立目录安装 Harness，用于持久化接口回归。
+npm install --prefix /tmp/dsh-rc2 @deepseek-ai/dsh@0.1.7-rc.2
+npm run test:persistence -- /tmp/dsh-rc2
 ```
 
 ## 📄 License

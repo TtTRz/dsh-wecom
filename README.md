@@ -43,7 +43,7 @@ The published package ships prebuilt `dist/` — no build scripts run on install
 
 ```sh
 dsh plugin --profile web add dsh-wecom          # latest
-dsh plugin --profile web add dsh-wecom@0.5.2    # pin a version
+dsh plugin --profile web add dsh-wecom@0.5.3    # pin a version
 ```
 
 Upgrade a pinned install the same way (`dsh-wecom@<newer version>`). After
@@ -55,12 +55,17 @@ release details.
 
 ### Upgrading from 0.3.x
 
-Version 0.5.2 includes session history navigation and the streaming and card
+Version 0.5.3 includes session history navigation and the streaming and card
 delivery fixes from 0.5.0–0.5.1. The channel now publishes status and reconnect
 services; it no longer mounts a browser panel, bot manager, or `/api/wecom/*`
 routes. Use a separate dashboard integration if you need those interfaces.
 Keep each bot's `namespace` and working directory unchanged to retain its
 conversation routing and persisted history.
+
+For Harness 0.1.7-rc.2, use 0.5.3 or newer: 0.5.2 still reads the legacy
+persistence API and can show an empty history list. This release covers
+persistence API versions `0.1.0-rc.6` and `0.1.7-rc.2`; the rc.2 CI test
+uses its real JSONL backend, without a bot connection or model request.
 
 ## 📦 Install from source
 
@@ -75,8 +80,8 @@ dsh plugin --profile web add github:TtTRz/dsh-wecom#<sha>
 ```sh
 git clone https://github.com/TtTRz/dsh-wecom && cd dsh-wecom
 npm install --legacy-peer-deps
-npm pack                              # produces dsh-wecom-0.5.2.tgz
-dsh plugin --profile web add ./dsh-wecom-0.5.2.tgz
+npm pack                              # produces dsh-wecom-0.5.3.tgz
+dsh plugin --profile web add ./dsh-wecom-0.5.3.tgz
 ```
 
 Local checkout: `dsh plugin --profile web add /absolute/path/to/dsh-wecom` (links the source; run `npm install --legacy-peer-deps && npm run build` first).
@@ -189,6 +194,10 @@ Why not a bare `agents.create`: the preset is mounted in `setup` (a bare agent h
 ```sh
 npm install --legacy-peer-deps
 npm run check   # biome + typecheck + test + build
+
+# Install an isolated Harness runtime for the persistence smoke test.
+npm install --prefix /tmp/dsh-rc2 @deepseek-ai/dsh@0.1.7-rc.2
+npm run test:persistence -- /tmp/dsh-rc2
 ```
 
 ## 📄 License

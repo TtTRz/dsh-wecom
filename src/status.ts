@@ -3,6 +3,7 @@ import { freemem, loadavg, totalmem } from 'node:os'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ChannelStatus } from './channel.js'
 import { sanitizeNamespace, statusBaseOf } from './config.js'
+import { listSessionHeaders, type SessionListing } from './persistence.js'
 
 /** One live agent projected to the wire; scalars only, no live objects. */
 export interface AgentView {
@@ -167,9 +168,6 @@ interface WebServerLike {
 interface AgentsLike {
   list(): readonly AgentLike[]
 }
-interface PersistenceLike {
-  list(): Promise<readonly { id: string }[]>
-}
 
 /**
  * Serve `GET <base>/status` for the browser UI: connection health, live
@@ -201,9 +199,9 @@ export function registerStatusRoute(
       }
       try {
         const agents = (ctx.get('agents') as AgentsLike | undefined)?.list() ?? []
-        const persistence = ctx.get('sessionPersistence') as PersistenceLike | undefined
+        const persistence = ctx.get('sessionPersistence') as SessionListing | undefined
         const sessionIds =
-          persistence === undefined ? [] : (await persistence.list()).map((h) => String(h.id))
+          persistence === undefined ? [] : (await listSessionHeaders(persistence)).map((h) => h.id)
         const payload = statusPayload(snapshot(), agents, sessionIds, peerOf)
         send(200, {
           ...payload,

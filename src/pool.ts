@@ -29,6 +29,7 @@ import { wecomIdentityEnricherServiceName } from './config.js'
 import { clipUtf8, conversationId, Semaphore } from './helpers.js'
 import { type MediaPort, safeFilename, saveUploadFile } from './media.js'
 import { containsImageMedia, toContentBlocks } from './message.js'
+import { listSessionHeaders, readSessionEvents } from './persistence.js'
 
 /** One tool invocation observed during a turn, for the optional activity summary. */
 export interface ToolCallSummary {
@@ -631,11 +632,11 @@ export class AgentPool {
    * `groupSession` covers any later first message regardless.
    */
   async start(): Promise<void> {
-    const headers = await this.ctx.sessionPersistence.list()
-    this.persisted = new Set(headers.map((header) => String(header.id)))
+    const headers = await listSessionHeaders(this.ctx.sessionPersistence)
+    this.persisted = new Set(headers.map((header) => header.id))
     for (const header of headers) {
-      const cwd = (header as { cwd?: string }).cwd
-      if (cwd !== undefined) this.headerCwds.set(String(header.id), cwd)
+      const cwd = header.cwd
+      if (cwd !== undefined) this.headerCwds.set(header.id, cwd)
     }
     await mkdir(this.config.cwd, { recursive: true })
     this.loadState()
@@ -669,8 +670,8 @@ export class AgentPool {
     // gates the retry loop only; workspaces resolve inside groupSession.
     if (this.ctx.get('workspaceRegistry') !== undefined) {
       for (const header of headers) {
-        const id = String(header.id)
-        const cwd = (header as { cwd?: string }).cwd
+        const id = header.id
+        const cwd = header.cwd
         if (id.startsWith('dsh-wecom-') && cwd !== undefined) {
           await this.groupSession(id, cwd)
         }
@@ -1224,8 +1225,8 @@ export class AgentPool {
     const base = conversationId(this.config.namespace, message)
     const currentEpoch = this.epochs.get(base) ?? 0
     const rows: Array<{ id: string; epoch: number; createdAt: number | null }> = []
-    for (const header of await this.ctx.sessionPersistence.list()) {
-      const id = String(header.id)
+    for (const header of await listSessionHeaders(this.ctx.sessionPersistence)) {
+      const id = header.id
       const epoch = epochOfId(base, id)
       if (epoch === undefined) continue
       const createdAt = typeof header.createdAt === 'number' ? header.createdAt : null
@@ -1246,8 +1247,8 @@ export class AgentPool {
     const base = conversationId(this.config.namespace, message)
     const epoch = this.epochs.get(base) ?? 0
     const id = this.withEpoch(base, epoch)
-    const headers = await this.ctx.sessionPersistence.list()
-    const header = headers.find((h) => String(h.id) === id)
+    const headers = await listSessionHeaders(this.ctx.sessionPersistence)
+    const header = headers.find((h) => h.id === id)
     if (header === undefined) return undefined
     const createdAt = typeof header.createdAt === 'number' ? header.createdAt : null
     return this.describeSession(id, epoch, createdAt, true)
@@ -1273,8 +1274,8 @@ export class AgentPool {
       return `当前就是 session #${epoch}。`
     }
     const id = this.withEpoch(base, epoch)
-    const exists = (await this.ctx.sessionPersistence.list()).some(
-      (header) => String(header.id) === id,
+    const exists = (await listSessionHeaders(this.ctx.sessionPersistence)).some(
+      (header) => header.id === id,
     )
     if (!exists) {
       return `没有编号为 ${epoch} 的 session；发送 /session 查看可恢复的历史列表。`
@@ -1317,8 +1318,8 @@ export class AgentPool {
     }
     for (const id of this.persisted) consider(id)
     try {
-      for (const header of await this.ctx.sessionPersistence.list()) {
-        consider(String(header.id))
+      for (const header of await listSessionHeaders(this.ctx.sessionPersistence)) {
+        consider(header.id)
       }
     } catch {
       // Persistence unavailable/transient: fall back to the in-memory view.
@@ -1355,11 +1356,12 @@ export class AgentPool {
     if (live !== undefined)
       return summarizeSessionLog(liveEvents(live.session) as readonly unknown[])
     try {
-      const inspection = await this.ctx.sessionPersistence.inspect(
-        SessionId(id),
+      const events = await readSessionEvents(
+        this.ctx.sessionPersistence,
+        id,
         AbortSignal.timeout(3_000),
       )
-      return summarizeSessionLog(inspection.events as readonly unknown[])
+      return summarizeSessionLog(events)
     } catch {
       return { turns: null }
     }
@@ -1849,8 +1851,8 @@ export class AgentPool {
   private async sessionExists(id: string): Promise<boolean> {
     if (this.persisted.has(id)) return true
     try {
-      const headers = await this.ctx.sessionPersistence.list()
-      const found = headers.some((header) => String(header.id) === id)
+      const headers = await listSessionHeaders(this.ctx.sessionPersistence)
+      const found = headers.some((header) => header.id === id)
       if (found) this.persisted.add(id)
       return found
     } catch {

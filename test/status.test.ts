@@ -121,7 +121,12 @@ describe('registerStatusRoute', () => {
         }
         if (name === 'agents') return { list: () => agents }
         if (name === 'sessionPersistence') {
-          return { list: async () => [{ id: 'dsh-wecom-single-a' }, { id: 'session-b' }] }
+          return {
+            list: async () => [
+              { header: { id: 'dsh-wecom-single-a' } },
+              { header: { id: 'session-b' } },
+            ],
+          }
         }
         return undefined
       }),
