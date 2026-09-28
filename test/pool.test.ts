@@ -420,7 +420,10 @@ describe('AgentPool', () => {
 
   it('uses the configured provider/model for new conversations', async () => {
     const { ctx, live, created } = makeHarness()
-    const manager = new AgentPool(ctx as never, testConfig({ provider: 'example-provider', model: 'example-model' }))
+    const manager = new AgentPool(
+      ctx as never,
+      testConfig({ provider: 'example-provider', model: 'example-model' }),
+    )
     await manager.start()
     await manager.handle(singleMessage('hello'), noopDownload)
     const agent = live.get(created[0]?.sessionId ?? '') as FakeAgent | undefined
