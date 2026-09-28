@@ -1,7 +1,7 @@
 {
   "name": "dsh-wecom",
-  "version": "0.5.1",
-  "description": "dsh-wecom: a WeCom AI Bot channel for DeepSeek Harness — each chat runs a persistent, preset-backed agent over the official long connection.",
+  "version": "0.5.2",
+  "description": "dsh-wecom: a WeCom AI Bot channel for DeepSeek Harness \u2014 each chat runs a persistent, preset-backed agent over the official long connection.",
   "author": "TtTRz <romc1224@gmail.com>",
   "type": "module",
   "main": "dist/index.js",
@@ -22,6 +22,7 @@
     "cordis.patch.yml",
     "README.md",
     "README.zh.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "dsh": {

@@ -1,6 +1,8 @@
 # dsh-wecom
 
-> [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的企业微信 AI 机器人 channel——每条单聊/群聊背后都是一个真正带工具的 agent，流式回复、思考卡片、实时状态面板。
+[English](README.md) | [简体中文](README.zh.md)
+
+> [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的企业微信 AI 机器人渠道——支持持久化 agent、流式回复、思考卡片，以及单聊和群聊的历史会话切换。
 
 [![npm version](https://img.shields.io/npm/v/dsh-wecom)](https://www.npmjs.com/package/dsh-wecom)
 [![license](https://img.shields.io/npm/l/dsh-wecom)](LICENSE)
@@ -16,7 +18,7 @@
 - 🛡️ **访问策略**——单聊/群聊各自 `open` / `allowlist` / `disabled`（群按 `chatid` 控制）
 - 🧹 **消息治理**——msgid 去重、按会话排队、全局并发上限、单轮超时主动 cancel 不留僵尸轮次
 - 📡 **自愈**——长连接断开（被踢/鉴权失败/被新客户端顶掉）后按 `restartIntervalMs`（默认 10s）自动重连
-- 🩺 **可观测**——主机级 `wecomChannelStatus` 服务、`GET /api/wecom/status` JSON 路由、侧栏入口 + 连接状态圆点 + 浮动状态面板
+- 🩺 **可观测**——每个机器人提供状态与重连服务，可接入独立管理面板
 - 💬 **机器人命令**——`/ping /help /status /stop /compact /new /session /current /resume`
 
 ## 🚀 快速开始
@@ -40,11 +42,20 @@ dsh web
 
 ```sh
 dsh plugin --profile web add dsh-wecom          # 最新版
-dsh plugin --profile web add dsh-wecom@0.1.17   # 锁定版本
+dsh plugin --profile web add dsh-wecom@0.5.2    # 锁定版本
 ```
 
 升级同理：`dsh plugin --profile web add dsh-wecom@<新版本>`。装好后配置
 `WECOM_BOT_ID` / `WECOM_BOT_SECRET`（见快速开始）并重启 `dsh web`。
+
+需要 Node.js `22.19` 或更新版本。版本变更见 [CHANGELOG](CHANGELOG.md)。
+
+### 从 0.3.x 升级
+
+0.5.2 包含 0.5.0–0.5.1 的历史会话切换、流式回复和图片卡片投递修复。
+渠道插件现在提供状态与重连服务，不再自带浏览器状态面板、机器人管理界面或
+`/api/wecom/*` 路由。需要这些界面时，请使用独立的面板集成。
+升级时保持机器人的 `namespace` 和工作目录不变，以保留会话路由和持久化历史。
 
 ## 📦 从源码安装
 
@@ -54,15 +65,16 @@ Git 安装（请锁定 commit——构建脚本会在你机器上执行）：
 dsh plugin --profile web add github:TtTRz/dsh-wecom#<sha>
 ```
 
-> pnpm ≥10 默认拒绝 git 依赖的构建脚本（`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`）：把 pnpm 提示的包名加进该 profile 的 `pnpm-workspace.yaml` 后重试。想完全避开授权，用预构建 tarball：
+> 如果 pnpm 报 `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`，先审核固定的提交，再将它输出的完整 `allowBuilds` 条目加入对应 profile 的 `pnpm-workspace.yaml`。条目可能包含 Git URL 和提交 SHA，仅填写包名不够。重新安装，或改用本地构建的 tarball：
 
 ```sh
 git clone https://github.com/TtTRz/dsh-wecom && cd dsh-wecom
-npm install && npm pack                # 产出 dsh-wecom-0.1.5.tgz
-dsh plugin --profile web add ./dsh-wecom-0.1.5.tgz
+npm install --legacy-peer-deps
+npm pack                              # 产出 dsh-wecom-0.5.2.tgz
+dsh plugin --profile web add ./dsh-wecom-0.5.2.tgz
 ```
 
-本地目录：`dsh plugin --profile web add /绝对路径/dsh-wecom`（链接源码、不跑构建脚本——先 `npm install && npm run build` 产出 `dist/`）。
+本地目录：`dsh plugin --profile web add /绝对路径/dsh-wecom`（链接源码；先执行 `npm install --legacy-peer-deps && npm run build` 产出 `dist/`）。
 
 ## ⚙️ 配置
 
@@ -85,6 +97,28 @@ dsh plugin --profile web add ./dsh-wecom-0.1.5.tgz
     greeting: 你好，我是助手。
 ```
 
+### 多机器人配置
+
+每个插件实例对应一个企微机器人。为新增实例设置不同的 `namespace`，并分别配置
+凭据、访问策略、preset 和模型路由：
+
+```yaml
+- insert:
+    - id: wecom-channel-lab
+      name: dsh-wecom
+      config:
+        botId: !!js process.env.WECOM_BOT_ID_2
+        credentialName: WECOM_BOT_SECRET_2
+        namespace: lab
+        preset: standard
+```
+
+非默认实例提供 `wecomChannelStatus.<namespace>` 服务，路由状态保存在
+`.dsh-wecom-state.<namespace>.json`。默认实例使用 `wecomChannelStatus`
+和 `.dsh-wecom-state.json`。面板可直接消费各实例的服务，无需指定一个主机器人。
+
+### 配置参考
+
 | 字段 | 默认 | 含义 |
 | --- | --- | --- |
 | `cwd` | `~/.wecom-sessions` | agent 工作目录：WeCom 会话、上传文件（`.wecom-uploads/`）与 `.dsh-wecom-state.json` 都落在这里，侧边栏 "WeCom" 工作区也认领在该目录上；可用 `DSH_WECOM_CWD` 覆盖，必须为绝对路径 |
@@ -100,7 +134,11 @@ dsh plugin --profile web add ./dsh-wecom-0.1.5.tgz
 | `showReasoning` | `true` | 推理包进企微原生 `<think>` 卡片 |
 | `showToolCalls` | `true` | 在 `<think>` 卡片内渲染紧凑的工具调用列表 |
 | `maxConcurrent` | `4` | 全局并发轮次上限 |
-| `turnTimeoutMs` | `300000` | 单轮超时（超时取消本轮） |
+| `turnTimeoutMs` | `300000` | 无进展超时；会话事件和流式帧会重置期限 |
+| `approvalMode` | `chat` | `chat` 在聊天中批准/拒绝提权请求；`notify` 只通知、由网页决定；`off` 不发送通知 |
+| `approvalTimeoutMs` | `300000` | 聊天审批等待时间，超时取消请求 |
+| `approvalAllowlist` | `[]` | 可回答审批请求的 userid；为空时允许所有已通过渠道访问策略的发送者 |
+| `approvalHint` | `回复「批准」继续，回复「拒绝」取消。` | 审批请求附带的回复提示 |
 
 ## 💬 命令
 
@@ -135,9 +173,9 @@ dsh-wecom（host 插件）
 
 ## 🧩 集成
 
-- **状态服务**——`ctx.get('wecomChannelStatus').snapshot()` 只返回标量（`connected`、`stopping`、`conversations`、`authenticatedAt`、`lastError`），供面板/UI 插件使用
-- **REST 路由**——`GET /api/wecom/status`（有 web server 时注册，JSON）；`POST /api/wecom/restart` 重连渠道
-- **浏览器 UI**——自带 client 半身（`/plugins/dsh-wecom/client.js` 提供，无需前端重建）：侧栏入口 + 连接状态圆点 + 每 5 秒轮询的浮动状态面板
+- **状态服务**——`ctx.get('wecomChannelStatus').snapshot()` 返回标量（`connected`、`stopping`、`conversations`、`authenticatedAt`、`lastError`），供面板/UI 插件使用；其他机器人可用 `channelStatusServiceName(namespace)` 获取服务名
+- **重连服务**——调用同一个服务的 `reconnect()`，替换连接并唤醒重连循环
+- **面板集成**——渠道不注册 HTTP 路由或浏览器插槽；独立的 UI 插件可消费这些服务，并管理自己的路由、鉴权和展示
 
 ## 🧪 开发
 

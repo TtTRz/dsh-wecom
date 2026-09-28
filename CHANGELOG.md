@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-09-28
+
+### Changed
+
+- Publish the session-navigation and streaming-reliability updates documented
+  in 0.5.0 and 0.5.1 to npm.
+- Document the current channel-only architecture: status and reconnect services
+  remain available, while a separate dashboard owns the web UI and HTTP routes.
+  Upgrades from 0.3.x no longer receive the bundled status panel or bot manager.
+- Refresh English and Chinese installation, upgrade, multi-bot, and approval
+  documentation; replace deployment-specific test examples with generic data.
+
+### Fixed
+
+- Complete plugin initialization while the WebSocket loop runs in the
+  background, making the status service available to other plugins.
+- Format the anonymized model fixture so the full CI check passes.
+
 ## [0.5.1] - 2026-09-22
 
 ### Fixed

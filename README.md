@@ -1,6 +1,8 @@
 # dsh-wecom
 
-> WeCom AI Bot channel for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) — every single/group chat is a real agent with tools, streaming replies, thinking cards, and a live status panel.
+[English](README.md) | [简体中文](README.zh.md)
+
+> WeCom AI Bot channel for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) — persistent agents, streaming replies, thinking cards, and session navigation for single and group chats.
 
 [![npm version](https://img.shields.io/npm/v/dsh-wecom)](https://www.npmjs.com/package/dsh-wecom)
 [![license](https://img.shields.io/npm/l/dsh-wecom)](LICENSE)
@@ -17,7 +19,7 @@ Wire a WeCom AI Bot to DeepSeek Harness over the official long connection. Each 
 - 🛡️ **Access policy** — `open` / `allowlist` / `disabled` per channel (dm and group, gated by `chatid` for groups).
 - 🧹 **Housekeeping** — msgid dedup, per-conversation queues, a global concurrency cap, and per-turn timeouts that cancel the turn instead of leaving zombies.
 - 📡 **Self-healing** — when the long connection dies (kicked, auth failure, replaced client), the channel restarts itself after `restartIntervalMs` (default 10s).
-- 🩺 **Observability** — a host-wide `wecomChannelStatus` service, a JSON route `GET /api/wecom/status`, a sidebar action with a live connection dot, and a floating status panel.
+- 🩺 **Observability** — per-bot status and reconnect services for integration with a separate dashboard.
 - 💬 **Bot commands** — `/ping /help /status /stop /compact /new /session /current /resume`.
 
 ## 🚀 Quick Start
@@ -41,12 +43,24 @@ The published package ships prebuilt `dist/` — no build scripts run on install
 
 ```sh
 dsh plugin --profile web add dsh-wecom          # latest
-dsh plugin --profile web add dsh-wecom@0.1.17   # pin a version
+dsh plugin --profile web add dsh-wecom@0.5.2    # pin a version
 ```
 
 Upgrade a pinned install the same way (`dsh-wecom@<newer version>`). After
 installing, set `WECOM_BOT_ID` / `WECOM_BOT_SECRET` (see Quick Start) and
 restart `dsh web`.
+
+Node.js `22.19` or newer is required. See the [changelog](CHANGELOG.md) for
+release details.
+
+### Upgrading from 0.3.x
+
+Version 0.5.2 includes session history navigation and the streaming and card
+delivery fixes from 0.5.0–0.5.1. The channel now publishes status and reconnect
+services; it no longer mounts a browser panel, bot manager, or `/api/wecom/*`
+routes. Use a separate dashboard integration if you need those interfaces.
+Keep each bot's `namespace` and working directory unchanged to retain its
+conversation routing and persisted history.
 
 ## 📦 Install from source
 
@@ -56,15 +70,16 @@ Git install (pin the commit — build scripts run on your machine):
 dsh plugin --profile web add github:TtTRz/dsh-wecom#<sha>
 ```
 
-> pnpm ≥10 refuses build scripts of git dependencies (`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`): add the package key pnpm prints to that profile's `pnpm-workspace.yaml`, then re-run. Prefer the prebuilt tarball to avoid authorization entirely:
+> If pnpm blocks a Git dependency with `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`, review the pinned commit and copy the exact `allowBuilds` entry it prints into that profile's `pnpm-workspace.yaml`. The key may include the Git URL and commit; the package name alone is not sufficient. Re-run the install, or use a locally built tarball:
 
 ```sh
 git clone https://github.com/TtTRz/dsh-wecom && cd dsh-wecom
-npm install && npm pack                # produces dsh-wecom-0.1.5.tgz
-dsh plugin --profile web add ./dsh-wecom-0.1.5.tgz
+npm install --legacy-peer-deps
+npm pack                              # produces dsh-wecom-0.5.2.tgz
+dsh plugin --profile web add ./dsh-wecom-0.5.2.tgz
 ```
 
-Local checkout: `dsh plugin --profile web add /absolute/path/to/dsh-wecom` (links the source, no build scripts — run `npm install && npm run build` first).
+Local checkout: `dsh plugin --profile web add /absolute/path/to/dsh-wecom` (links the source; run `npm install --legacy-peer-deps && npm run build` first).
 
 ## ⚙️ Configuration
 
@@ -94,34 +109,22 @@ One composition row = one WeCom bot. Mount the same plugin again with a distinct
 and model route — in the same process:
 
 ```yaml
-- id: wecom-channel-lab
-  name: dsh-wecom
-  config:
-    botId: !!js process.env.WECOM_BOT_ID_2
-    credentialName: WECOM_BOT_SECRET_2
-    namespace: lab          # keys session ids, routes, state file, service name
-    preset: code            # any preset this bot should speak with
+- insert:
+    - id: wecom-channel-lab
+      name: dsh-wecom
+      config:
+        botId: !!js process.env.WECOM_BOT_ID_2
+        credentialName: WECOM_BOT_SECRET_2
+        namespace: lab
+        preset: standard
 ```
 
-Every non-default row gets its own `/api/wecom-<ns>/status` and
-`/api/wecom-<ns>/restart` routes and its own `.dsh-wecom-state.<ns>.json` state
-file; the default row keeps the legacy unprefixed paths. To surface secondary
-bots in the web panel's switcher, list their namespaces on the default row:
+Each non-default bot publishes `wecomChannelStatus.<namespace>` and stores
+its routing state in `.dsh-wecom-state.<namespace>.json`. The default bot uses
+`wecomChannelStatus` and `.dsh-wecom-state.json`. A dashboard can consume these
+services without designating one bot as the primary UI host.
 
-```yaml
-    aggregateBots: [lab]    # default row only; panels show chips per bot
-```
-
-### Bot manager (web UI)
-
-A `企微机器人` dock entry below the skill center opens a panel that lists every
-`dsh-wecom` row and edits per-bot **preset** and **workspace name** (the name
-that replaces the `WeCom` workspace-title prefix). It can also add and delete
-rows. It rewrites `cordis.patch.yml` surgically (comments and `!!js
-process.env.*` expressions are preserved), backed by `GET/PUT/POST/DELETE
-/api/wecom/bots` mounted on the `default` row only. Changes apply at the next
-dsh-web restart — the panel says so explicitly. Configure the patch path via
-`patchPath` (default `~/.dsh/profiles/web/cordis.patch.yml`).
+### Configuration reference
 
 | Field | Default | Meaning |
 | --- | --- | --- |
@@ -138,7 +141,7 @@ dsh-web restart — the panel says so explicitly. Configure the patch path via
 | `showReasoning` | `true` | Wrap model reasoning in WeCom's native `<think>` card |
 | `showToolCalls` | `true` | Render a compact tool-call activity list inside the `<think>` card |
 | `maxConcurrent` | `4` | Global cap on concurrent turns |
-| `turnTimeoutMs` | `300000` | Per-turn timeout (cancels the turn) |
+| `turnTimeoutMs` | `300000` | No-progress timeout; session events and stream frames reset the deadline |
 | `approvalMode` | `chat` | In-chat sandbox-escalation approvals: `chat` answers from the chat (reply 批准/拒绝), `notify` only pushes the ask, `off` is fully silent (web UI decides) |
 | `approvalTimeoutMs` | `300000` | How long an in-chat approval waits before failing closed (`cancelled`) |
 | `approvalAllowlist` | `[]` | Userids allowed to answer in-chat approvals; empty admits every admitted sender |
@@ -177,9 +180,9 @@ Why not a bare `agents.create`: the preset is mounted in `setup` (a bare agent h
 
 ## 🧩 Integrations
 
-- **Status service** — `ctx.get('wecomChannelStatus').snapshot()` returns plain scalars (`connected`, `stopping`, `conversations`, `authenticatedAt`, `lastError`) for dashboards and UI plugins.
-- **REST route** — `GET /api/wecom/status` (JSON, registered when a web server is present); `POST /api/wecom/restart` reconnects the channel.
-- **Browser UI** — the bundled client half (served as `/plugins/dsh-wecom/client.js`, no frontend rebuild) adds a sidebar action with a live connection dot and a floating status panel that polls every five seconds.
+- **Status service** — `ctx.get('wecomChannelStatus').snapshot()` returns plain scalars (`connected`, `stopping`, `conversations`, `authenticatedAt`, `lastError`) for dashboards and UI plugins. Use `channelStatusServiceName(namespace)` for other bots.
+- **Reconnect service** — call `reconnect()` on the same service to replace the connection and wake its reconnect loop.
+- **Dashboard integration** — the channel registers no HTTP routes or browser slots. A separate UI plugin can consume the services and own its routes, authentication, and display.
 
 ## 🧪 Development
 
