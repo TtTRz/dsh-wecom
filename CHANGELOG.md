@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-22
+
+### Fixed
+
+- **Streaming went silent after the harness 0.1.6 upgrade.** The pool watched
+  `session/event` for `assistant/chunk` to drive both the live WeCom stream and
+  `Reply.reasoning`, but that event no longer exists: the live model-delta feed
+  is now the transient `agent/assistant-stream` event (`Agent`-scoped frames
+  carrying `text-delta` / `reasoning-delta`), while `assistant/chunk` only
+  survives as a V0-log replay shape. The turn therefore emitted no delta at all
+  — the chat showed `Working…` until the final `finish=true` frame delivered the
+  whole answer at once, and the final `<think>` card carried tool calls but no
+  reasoning. The pool now subscribes to `agent/assistant-stream` and keeps the
+  `assistant/chunk` branch as a legacy fallback that is ignored once real
+  stream frames are seen (so a harness emitting both cannot double-count).
+- **A thinking-only turn could be killed as stuck.** The no-progress watchdog
+  reset its deadline on `session/event` alone, but a long reasoning pass with no
+  tool call emits only `agent/assistant-stream` frames. Such a pass looked like
+  silence and was cancelled with "agent response timed out". The watchdog now
+  treats stream frames as progress too.
+- **Rendered cards were dropped whenever the final stream frame failed.** Card
+  delivery shared the passive stream's `try`/`catch`, so a report turn that
+  outlived the ~6-minute stream window (errcode 846608) fell back to the
+  proactive text push and skipped every image — the user got the written report
+  with no card. Cards now ship on their own path after the text lands by
+  whichever route succeeded.
+
+### Added
+
+- Turn failures in the stream fallback and card-send paths are recorded to the
+  `DSH_WECOM_ERROR_LOG` file (`/tmp/dsh-wecom-error.log` by default), matching
+  the existing turn-failure sink — the plugin logger never reaches the service
+  journal, which is why these failures were invisible in production.
+
+## [0.5.0] - 2026-09-02
+
+### Added
+
+- **Session history navigation** — three new bot commands for browsing and
+  switching between a chat's past sessions. Every `/new` mints the next epoch
+  (`base~gN`) while the older sessions stay persisted and visible in the web
+  sidebar, so a chat accumulates one resumable session per epoch; until now
+  there was no way back except the web UI.
+  - `/session` (alias `/sessions`) lists this chat's sessions newest-first —
+    epoch number, start time, completed turns, and the latest title — with the
+    session new messages route to marked `*`. Only the chat's own base id and
+    its `~gN` epochs are listed (other chats and web sessions never leak in).
+  - `/current` shows the one session new messages currently route to.
+  - `/resume <n>` switches the chat's routing pointer to epoch `n` (the number
+    shown by `/session`; `0` is the original session). The selection is
+    persisted to `.dsh-wecom-state.json`, so it survives restarts exactly like
+    `/new`. Only sessions that exist and are not archived in the web UI may be
+    resumed; a running turn on the previous session is left to finish, and the
+    switch applies from the next message on. Resuming works across a restart
+    too — the epoch comes back from the state file and the session is resumed
+    from persistence rather than recreated.
+- `SessionView` is exported for channels/UIs that want the structured rows.
+
+### Fixed
+
+- `/new` after `/resume` no longer collides with an existing session. The
+  fresh epoch is now one past the HIGHEST epoch ever minted for the chat
+  (previously "current + 1"): rewinding the routing pointer to an older epoch
+  and then starting fresh used to reuse an existing `~gN` id and silently
+  continue its old history instead of opening a new session.
+
 ## [0.3.0] - 2026-08-25
 
 ### Fixed

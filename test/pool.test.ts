@@ -1,6 +1,8 @@
-import { readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { wecomIdentityEnricherServiceName } from '../src/config.js'
 import { conversationId } from '../src/helpers.js'
 import { AgentPool } from '../src/pool.js'
 import { testConfig } from './test-config.js'
@@ -10,17 +12,25 @@ interface FakeAgent {
   options: { provider: string; model: string }
   session: { id: string; events: unknown[]; requestHeader?: () => unknown }
   ctx: {
-    on: (event: string, handler: (...args: unknown[]) => void) => () => boolean
+    on: (event: string, handler: (...args: unknown[]) => unknown) => () => boolean
+    provide: ReturnType<typeof vi.fn>
     systemPrompt: { section: ReturnType<typeof vi.fn> }
   }
   cancel: ReturnType<typeof vi.fn>
   followup: ReturnType<typeof vi.fn>
   whenIdle: ReturnType<typeof vi.fn>
   fire: (event: string, ...args: unknown[]) => void
+  /** Direct access to one registered listener set (gate assertions). */
+  handlersOf: (event: string) => Set<(...args: unknown[]) => unknown>
 }
 
 function makeAgent(
-  options: { hang?: boolean; replyText?: string; stream?: unknown[] } = {},
+  options: {
+    hang?: boolean
+    replyText?: string
+    stream?: unknown[]
+    section?: ReturnType<typeof vi.fn>
+  } = {},
 ): FakeAgent {
   const events: unknown[] = []
   const handlers = new Map<string, Set<(...args: unknown[]) => void>>()
@@ -32,19 +42,34 @@ function makeAgent(
     options: { provider: 'deepseek', model: 'deepseek-chat' },
     session: { id: '', events, requestHeader: () => undefined },
     ctx: {
-      on: (event: string, handler: (...args: unknown[]) => void) => {
-        const set = handlers.get(event) ?? new Set<(...args: unknown[]) => void>()
+      on: (event: string, handler: (...args: unknown[]) => unknown) => {
+        const set = handlers.get(event) ?? new Set<(...args: unknown[]) => unknown>()
         set.add(handler)
         handlers.set(event, set)
         return () => set.delete(handler)
       },
-      systemPrompt: { section: vi.fn() },
+      provide: vi.fn(),
+      systemPrompt: {
+        section: options.section ?? vi.fn(),
+      },
     },
     cancel: vi.fn(),
     followup: vi.fn(() => {
       agent.status = 'running'
       if (options.hang) return
       for (const event of options.stream ?? []) {
+        if ((event as { type?: string }).type === 'assistant/chunk') {
+          // Production shape on the current harness: model deltas are transient
+          // `agent/assistant-stream` frames, never durable session events.
+          fire('agent/assistant-stream', {
+            agent,
+            frame: {
+              type: 'chunk',
+              chunk: (event as { data?: { chunk?: unknown } }).data?.chunk,
+            },
+          })
+          continue
+        }
         events.push(event)
         fire('session/event', agent.session, event)
       }
@@ -62,6 +87,7 @@ function makeAgent(
       return Promise.resolve()
     }),
     fire,
+    handlersOf: (event: string) => handlers.get(event) ?? new Set(),
   }
   return agent
 }
@@ -115,10 +141,12 @@ function makeHarness() {
           setup?: (agentCtx: unknown) => Promise<void>
         }) => {
           created.push({ sessionId: options.sessionId })
-          const agent = makeAgent()
+          const agent = makeAgent({ section })
           agent.session.id = options.sessionId
           if (options.agentOptions) agent.options = options.agentOptions
-          if (options.setup) await options.setup({ systemPrompt: { section } })
+          // Setup runs on the agent's own scoped context (real harness):
+          // identity seams (provide/on) must live on it too.
+          if (options.setup) await options.setup(agent.ctx)
           live.set(options.sessionId, agent)
           return {
             agent,
@@ -135,10 +163,10 @@ function makeHarness() {
           agentOptions?: { provider: string; model: string }
           setup?: (agentCtx: unknown) => Promise<void>
         }) => {
-          const agent = makeAgent()
+          const agent = makeAgent({ section })
           agent.session.id = options.resumeSessionId
           if (options.agentOptions) agent.options = options.agentOptions
-          if (options.setup) await options.setup({ systemPrompt: { section } })
+          if (options.setup) await options.setup(agent.ctx)
           live.set(options.resumeSessionId, agent)
           return {
             agent,
@@ -151,8 +179,16 @@ function makeHarness() {
       get: vi.fn((id: string) => live.get(id)),
     },
     get: vi.fn(() => undefined),
+    // The real cordis Context runs the callback once every named service is
+    // available; this double invokes it immediately when the stubbed `get`
+    // already answers all of them (and stays silent otherwise).
+    inject: (deps: string[], callback: (scoped: unknown) => void) => {
+      if (deps.every((name) => (ctx.get as (n: string) => unknown)(name) !== undefined)) {
+        callback(ctx)
+      }
+    },
   }
-  return { ctx, mounts, sections, disposed, created, live, fireSessionEvent }
+  return { ctx, mounts, sections, disposed, created, live, fireSessionEvent, sectionFn: section }
 }
 
 function singleMessage(text = 'hello'): never {
@@ -199,6 +235,7 @@ describe('AgentPool', () => {
     expect(mounts).toEqual(['standard'])
     expect(sections).toEqual([
       { name: 'wecom-instructions', order: 50, text: 'WeCom test instructions' },
+      { name: 'wecom-identity', order: 49, text: expect.any(Function) },
     ])
     expect(reply).toEqual({ text: 'Harness reply' })
     expect(manager.size()).toBe(1)
@@ -221,6 +258,94 @@ describe('AgentPool', () => {
     expect(ctx.sessionPersistence.list).toHaveBeenCalledOnce()
     await manager.handle(singleMessage(), noopDownload)
     expect(created).toHaveLength(1)
+  })
+
+  it('resumes when the routed session exists on disk but is missing from the startup snapshot', async () => {
+    const { ctx, created } = makeHarness()
+    const base = conversationId('default', singleMessage())
+    // start() scans an EMPTY store, so the in-memory snapshot has no ids.
+    ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValueOnce([])
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+
+    // The routed session materialized after start (another driver, or a prior
+    // process). Trusting the startup snapshot alone used to call create() on it
+    // and throw 'session "..." already exists' on EVERY later message.
+    ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue([{ id: base }])
+
+    await manager.handle(singleMessage(), noopDownload)
+
+    expect(created).toHaveLength(0)
+    expect(ctx.agents.resume).toHaveBeenCalledOnce()
+  })
+
+  it('falls back to resume when create collides on an existing session', async () => {
+    const { ctx, created } = makeHarness()
+    ;(ctx.agents.create as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('session "dsh-wecom-single-x" already exists'),
+    )
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+
+    await manager.handle(singleMessage(), noopDownload)
+
+    expect(created).toHaveLength(0)
+    expect(ctx.agents.resume).toHaveBeenCalledOnce()
+  })
+
+  it('adopts the session when another driver wins the write race', async () => {
+    const { ctx, live, sectionFn } = makeHarness()
+    const base = conversationId('default', singleMessage())
+    ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue([{ id: base }])
+    const other = makeAgent({ section: sectionFn })
+    other.session.id = base
+    ;(ctx.agents.resume as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      // The other driver (the web UI) is mid-resume: the write handle is taken
+      // while its agent becomes visible only now — the exact window that makes
+      // `ctx.agents.get` miss on both sides.
+      live.set(base, other)
+      throw new Error(`session "${base}" is already owned by an active write handle`)
+    })
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+
+    const reply = await manager.handle(singleMessage(), noopDownload)
+
+    expect(reply).toEqual({ text: 'Harness reply' })
+  })
+
+  it('surfaces a readable message when the write race never clears', async () => {
+    const { ctx } = makeHarness()
+    const base = conversationId('default', singleMessage())
+    ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue([{ id: base }])
+    ;(ctx.agents.resume as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error(`session "${base}" is already owned by an active write handle`),
+    )
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+
+    // Retries exhaust, then the user gets an actionable sentence — never the
+    // raw persistence error.
+    await expect(manager.handle(singleMessage(), noopDownload)).rejects.toThrow(
+      /正被另一处同时使用/,
+    )
+  })
+
+  it('/new mints past an epoch present on disk but absent from the startup snapshot', async () => {
+    const { ctx, created } = makeHarness()
+    const base = conversationId('default', singleMessage())
+    ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValueOnce([])
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+
+    ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: `${base}~g3` },
+    ])
+
+    const epoch = await manager.forget(singleMessage('new'))
+    expect(epoch).toBe(4)
+    await manager.handle(singleMessage('hi'), noopDownload)
+    expect(created[0]?.sessionId).toBe(`${base}~g4`)
   })
 
   it('reset starts a fresh agent on the next message', async () => {
@@ -333,6 +458,214 @@ describe('AgentPool', () => {
     expect(manager.selectionFor(bare as never).current).toBeUndefined()
   })
 
+  describe('session history commands', () => {
+    const T0 = 1_700_000_000_000
+    const T1 = 1_700_100_000_000
+    const T2 = 1_700_200_000_000
+
+    /** Headers for a chat with the base session plus two /new epochs. */
+    function chatHeaders(base: string) {
+      return [
+        { id: base, createdAt: T0 },
+        { id: `${base}~g1`, createdAt: T1 },
+        { id: `${base}~g2`, createdAt: T2 },
+        // Another chat's session and a web session must never leak in.
+        { id: 'dsh-wecom-single-otherchat', createdAt: T2 },
+        { id: 'session-web', createdAt: T2 },
+      ]
+    }
+
+    function inspectFor(titles: Record<string, string | undefined>) {
+      return vi.fn(async (id: string) => ({
+        meta: { id },
+        events:
+          titles[id] === undefined
+            ? []
+            : [{ type: 'session/title', seq: 2, data: { title: titles[id] } }],
+      }))
+    }
+
+    it("lists the chat's own sessions newest-first with title and turns", async () => {
+      const base = conversationId('default', singleMessage())
+      const { ctx, live, fireSessionEvent } = makeHarness()
+      ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue(
+        chatHeaders(base),
+      )
+      const manager = new AgentPool(ctx as never, testConfig())
+      await manager.start()
+      await manager.handle(singleMessage('one'), noopDownload)
+      // The chat's base id is persisted, so the turn resumes the live base
+      // agent (not create). Feed the pool's canonical-title watcher through its
+      // public session/event seam (the turn's own watcher is gone after settle).
+      const agent = live.get(base) as FakeAgent
+      const titleEvent: { type: string; seq: number; data: { title: string } } = {
+        type: 'session/title',
+        seq: 2,
+        data: { title: '当前话题' },
+      }
+      agent.session.events.push(titleEvent)
+      fireSessionEvent(agent.session, titleEvent)
+      ;(ctx.sessionPersistence as Record<string, unknown>).inspect = inspectFor({
+        [`${base}~g1`]: '旧话题一',
+        [`${base}~g2`]: '旧话题二',
+      }) as never
+
+      const views = await manager.listSessions(singleMessage())
+
+      expect(views.map((v) => v.sessionId)).toEqual([`${base}~g2`, `${base}~g1`, base])
+      expect(views.map((v) => v.epoch)).toEqual([2, 1, 0])
+      expect(views[2]).toMatchObject({ current: true, title: '当前话题', turns: 1, createdAt: T0 })
+      expect(views[1]).toMatchObject({ current: false, title: '旧话题一', createdAt: T1 })
+      expect(views[0]).toMatchObject({ current: false, title: '旧话题二', createdAt: T2 })
+    })
+
+    it('degrades to no title and null turns when the log cannot be inspected', async () => {
+      const base = conversationId('default', singleMessage())
+      const { ctx } = makeHarness()
+      ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue(
+        chatHeaders(base),
+      )(ctx.sessionPersistence as Record<string, unknown>).inspect = vi.fn(async () => {
+        throw new Error('corrupt log')
+      }) as never
+      const manager = new AgentPool(ctx as never, testConfig())
+      await manager.start()
+
+      const views = await manager.listSessions(singleMessage())
+
+      expect(views).toHaveLength(3)
+      for (const view of views) {
+        expect(view.title).toBeUndefined()
+        expect(view.turns).toBeNull()
+      }
+    })
+
+    it('shows the current session (from the live log) or nothing before the first message', async () => {
+      const base = conversationId('default', singleMessage())
+      const { ctx, live, fireSessionEvent } = makeHarness()
+      ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue([
+        { id: base, createdAt: T0 },
+      ])
+      const manager = new AgentPool(ctx as never, testConfig())
+      await manager.start()
+
+      // The base id is persisted, so the turn resumes the live base agent
+      // (it already logged one turn/end).
+      await manager.handle(singleMessage('one'), noopDownload)
+      const agent = live.get(base) as FakeAgent
+      const titleEvent: { type: string; seq: number; data: { title: string } } = {
+        type: 'session/title',
+        seq: 2,
+        data: { title: '当前话题' },
+      }
+      agent.session.events.push(titleEvent)
+      fireSessionEvent(agent.session, titleEvent)
+
+      const view = await manager.currentSession(singleMessage())
+      expect(view).toMatchObject({ epoch: 0, current: true, title: '当前话题', turns: 1 })
+
+      // A chat whose routed session is not persisted yet resolves to undefined.
+      ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue([])
+      await expect(manager.currentSession(singleMessage())).resolves.toBeUndefined()
+    })
+
+    it('resumes an older epoch and routes the next message to it', async () => {
+      const base = conversationId('default', singleMessage())
+      const { ctx, live } = makeHarness()
+      ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue(
+        chatHeaders(base),
+      )
+      const manager = new AgentPool(ctx as never, testConfig())
+      await manager.start()
+      // Simulate: the chat had /new'd twice, so routing sits on epoch 2.
+      ;(manager as unknown as { epochs: Map<string, number> }).epochs.set(base, 2)
+
+      const text = await manager.resumeSession(singleMessage(), '1')
+      expect(text).toContain('#1')
+
+      await manager.handle(singleMessage('continued'), noopDownload)
+      // Resumed (not re-created): the agent comes from persistence…
+      expect(ctx.agents.resume).toHaveBeenCalledWith(
+        expect.objectContaining({ resumeSessionId: `${base}~g1` }),
+      )
+      // …and the live registry now routes the chat to epoch 1.
+      expect([...live.keys()]).toContain(`${base}~g1`)
+    })
+
+    it('reports the already-current epoch, missing epochs, bad input, and archived sessions', async () => {
+      const base = conversationId('default', singleMessage())
+      const { ctx } = makeHarness()
+      ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue(
+        chatHeaders(base),
+      )
+      const manager = new AgentPool(ctx as never, testConfig())
+      await manager.start()
+
+      // No argument / garbage argument → usage hint, no routing change.
+      expect(await manager.resumeSession(singleMessage(), '')).toContain('/resume <编号>')
+      expect(await manager.resumeSession(singleMessage(), 'x')).toContain('/resume <编号>')
+      // Already on epoch 0 (default).
+      expect(await manager.resumeSession(singleMessage(), '0')).toContain('当前就是 session #0')
+      // Epoch 9 was never minted.
+      expect(await manager.resumeSession(singleMessage(), '9')).toContain('没有编号为 9')
+      // Routing is still epoch 0 after the failures above.
+      expect((manager as unknown as { epochs: Map<string, number> }).epochs.get(base) ?? 0).toBe(0)
+
+      // An archived session may not be resumed (the pool would skip it anyway).
+      ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+        name === 'workspaceRegistry' ? { archivedSessionIds: [`${base}~g1`] } : undefined,
+      )
+      expect(await manager.resumeSession(singleMessage(), '1')).toContain('归档')
+      expect((manager as unknown as { epochs: Map<string, number> }).epochs.get(base) ?? 0).toBe(0)
+    })
+
+    it('survives a restart: a resumed epoch keeps routing after the process reloads', async () => {
+      const base = conversationId('default', singleMessage())
+      const firstCtx = makeHarness().ctx
+      ;(firstCtx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue(
+        chatHeaders(base),
+      )
+      const first = new AgentPool(firstCtx as never, testConfig())
+      await first.start()
+      ;(first as unknown as { epochs: Map<string, number> }).epochs.set(base, 2)
+      await first.resumeSession(singleMessage(), '1')
+      await first.dispose()
+
+      // New pool (fresh process): the epoch comes back from the state file.
+      const { ctx: ctx2, created: created2 } = makeHarness()
+      ;(ctx2.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue(
+        chatHeaders(base),
+      )
+      const second = new AgentPool(ctx2 as never, testConfig())
+      await second.start()
+      await second.handle(singleMessage('continued'), noopDownload)
+      // Epoch 1 already exists on disk, so it is resumed — not re-created.
+      expect(created2).toHaveLength(0)
+      expect(ctx2.agents.resume).toHaveBeenCalledWith(
+        expect.objectContaining({ resumeSessionId: `${base}~g1` }),
+      )
+      await second.dispose()
+    })
+
+    it('/new after a rewind mints a fresh epoch instead of colliding with an existing session', async () => {
+      const base = conversationId('default', singleMessage())
+      const { ctx, created } = makeHarness()
+      ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue(
+        chatHeaders(base),
+      )
+      const manager = new AgentPool(ctx as never, testConfig())
+      await manager.start()
+      ;(manager as unknown as { epochs: Map<string, number> }).epochs.set(base, 2)
+      // Rewind to the original session, then /new — a naive "current + 1"
+      // would reopen ~g1 with its old history.
+      await manager.resumeSession(singleMessage(), '0')
+      const next = await manager.forget(singleMessage('new'))
+      expect(next).toBe(3)
+
+      await manager.handle(singleMessage('fresh'), noopDownload)
+      expect(created.at(-1)?.sessionId).toBe(`${base}~g3`)
+    })
+  })
+
   it('cancels the turn on response timeout', async () => {
     const hanging = makeAgent({ hang: true })
     const ctx = {
@@ -367,6 +700,57 @@ describe('AgentPool', () => {
     expect(hanging.cancel).toHaveBeenCalledWith({ kind: 'user' })
   })
 
+  it('keeps a thinking-only turn alive while stream frames keep arriving', async () => {
+    // A long reasoning pass emits ONLY `agent/assistant-stream` frames — no
+    // tool call, no step boundary, no durable session event. The no-progress
+    // watchdog must treat those frames as progress; watching the session
+    // firehose alone killed a working turn as "agent response timed out".
+    const agent = makeAgent({ hang: true })
+    const ctx = {
+      logger: () => ({ debug() {}, info() {}, warn() {}, error() {} }),
+      on: vi.fn(() => () => undefined),
+      sessionPersistence: { list: vi.fn(async () => []) },
+      agentDefaultModel: {
+        currentSelection: vi.fn(() => ({ provider: 'deepseek', model: 'deepseek-chat' })),
+      },
+      attachments: {
+        imageLimits: { maxImagesPerMessage: 4, maxMessageImageBytes: 10_000 },
+        saveImage: vi.fn(),
+      },
+      llm: { resolveModelInfo: vi.fn(async () => ({ inputModalities: ['text'] })) },
+      agentPresets: {
+        resolve: vi.fn(async () => ({ id: 'standard' })),
+        mount: vi.fn(async () => undefined),
+      },
+      agents: {
+        create: vi.fn(async () => ({ agent, dispose: vi.fn(async () => undefined) })),
+        resume: vi.fn(),
+        get: vi.fn(() => agent),
+      },
+      get: vi.fn(() => undefined),
+    }
+    const manager = new AgentPool(ctx as never, testConfig({ turnTimeoutMs: 60 }))
+    await manager.start()
+    const pending = manager.handle(singleMessage(), noopDownload)
+    pending.catch(() => undefined)
+
+    // Stream frames every 20ms keep the deadline reset, so the turn survives
+    // well past the 60ms timeout.
+    const ticker = setInterval(() => {
+      agent.fire('agent/assistant-stream', {
+        agent,
+        frame: { type: 'chunk', chunk: { type: 'reasoning-delta', index: 0, text: '…' } },
+      })
+    }, 20)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(agent.cancel).not.toHaveBeenCalled()
+
+    // Once the frames stop, real silence lets the watchdog fire as designed.
+    clearInterval(ticker)
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    expect(agent.cancel).toHaveBeenCalledWith({ kind: 'user' })
+  })
+
   it('claims a workspace on cwd and adds every conversation session to it', async () => {
     const added: string[] = []
     const create = vi.fn(async (path: string, title: string) => ({
@@ -393,6 +777,62 @@ describe('AgentPool', () => {
     await manager.forget(singleMessage('reset'))
     await manager.handle(singleMessage('two'), noopDownload)
     expect(added).toEqual([created[0]?.sessionId, created[1]?.sessionId])
+  })
+
+  it('mints one conversation directory so the header cwd and the workspace path agree', async () => {
+    // `conversationDir` mints its name from the wall clock, and nothing creates
+    // the directory until `openWorkspace` runs later in the same turn. A slow
+    // `agents.create` that crosses a second boundary must therefore NOT hand the
+    // session a different directory than its workspace row: that leaves the chat
+    // in Ungrouped beside an empty row (hailinluo, 2026-09-15 16:58).
+    const RealDate = Date
+    let offsetMs = 0
+    class ShiftedDate extends RealDate {
+      constructor(...args: [] | [number | string | Date]) {
+        if (args.length === 0) super(RealDate.now() + offsetMs)
+        else super(args[0] as number)
+      }
+      static override now(): number {
+        return RealDate.now() + offsetMs
+      }
+    }
+    vi.stubGlobal('Date', ShiftedDate)
+    // A private base: `conversationDir` adopts any existing directory whose name
+    // ends in the session-id tail, so the shared /tmp/wecom-test base (which
+    // carries leftovers from earlier runs) would bypass the very mint path this
+    // test exists to exercise.
+    const base = mkdtempSync(join(tmpdir(), 'wecom-mint-'))
+    try {
+      const { ctx } = makeHarness()
+      const create = vi.fn(async (path: string, title: string) => ({
+        attachSession: vi.fn(async () => undefined),
+        path,
+        title,
+      }))
+      ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+        name === 'workspaceRegistry' ? { create } : undefined,
+      )
+      const agentsCreate = ctx.agents.create as ReturnType<typeof vi.fn>
+      const realCreate = agentsCreate.getMockImplementation()
+      agentsCreate.mockImplementation(async (options: unknown) => {
+        // The session is created first; the workspace row is created after it.
+        offsetMs += 1_500
+        return realCreate?.(options)
+      })
+      const manager = new AgentPool(ctx as never, testConfig({ cwd: base }))
+      await manager.start()
+
+      await manager.handle(singleMessage('one'), noopDownload)
+
+      const createCall = agentsCreate.mock.calls[0] as [{ meta?: { cwd?: string } }] | undefined
+      const sessionCwd = createCall?.[0]?.meta?.cwd
+      expect(sessionCwd).toMatch(new RegExp(`^${base}/WeCom-u1-\\d{4}-\\d{6}-287789$`))
+      expect(create).toHaveBeenCalledTimes(1)
+      expect(create.mock.calls[0]?.[0]).toBe(sessionCwd)
+    } finally {
+      vi.unstubAllGlobals()
+      rmSync(base, { recursive: true, force: true })
+    }
   })
 
   it('skips workspace grouping when no registry exists', async () => {
@@ -540,6 +980,40 @@ describe('AgentPool', () => {
     expect(dirOf('dsh-wecom-single-00112233445566778899aabbccddee01~g3')).toBe(epoch)
   })
 
+  it('resolves the sender RTX before minting a new conversation peer label', async () => {
+    const { ctx } = makeHarness()
+    // A cold-cache enricher: peekRtx misses until enrich() resolves the RTX.
+    const cache: Record<string, string> = {}
+    const enricher = {
+      peekRtx: (userid: string) => cache[userid],
+      enrich: async (identity: { userid: string }) => {
+        cache[identity.userid] = 'sanfordsun'
+        return { rtx: 'sanfordsun' }
+      },
+    }
+    ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+      name === wecomIdentityEnricherServiceName('default') ? enricher : undefined,
+    )
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+    await manager.handle(singleMessage(), noopDownload)
+
+    const state = JSON.parse(readFileSync(join('/tmp/wecom-test', '.dsh-wecom-state.json'), 'utf8'))
+    const base = conversationId('default', singleMessage())
+    expect(state.peers[base]).toBe('sanfordsun')
+  })
+
+  it('falls back to the raw userid when no enricher is mounted', async () => {
+    const { ctx } = makeHarness()
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+    await manager.handle(singleMessage(), noopDownload)
+
+    const state = JSON.parse(readFileSync(join('/tmp/wecom-test', '.dsh-wecom-state.json'), 'utf8'))
+    const base = conversationId('default', singleMessage())
+    expect(state.peers[base]).toBe('u1')
+  })
+
   it('re-attaches persisted sessions whose stored cwd matches their per-session dir', async () => {
     const attached: string[] = []
     const create = vi.fn(async (path: string) => ({
@@ -581,6 +1055,95 @@ describe('AgentPool', () => {
     expect(paths[0]).toMatch(/^\/tmp\/wecom-test\/WeCom-.+-\d{4}-\d{6}-abcdef$/)
     expect(paths[1]).toMatch(/^\/tmp\/wecom-test\/WeCom-.+-\d{4}-\d{6}-def~g2$/)
     expect(paths[2]).toMatch(/^\/tmp\/wecom-test\/WeCom-.+-\d{4}-\d{6}-xyz789$/)
+  })
+
+  it('refreshes a stale workspace row title to the canonical peer label', async () => {
+    // `registry.create` returns an existing row untouched, so a title minted
+    // before the peer label changed stays stale in the sidebar (observed:
+    // directories migrated from the raw userid to the RTX kept "· T32120019A").
+    const stale = 'WeCom · T32120019A 09-03 23:49:34'
+    const setTitle = vi.fn(async (_title: string) => undefined)
+    const create = vi.fn(async () => ({
+      attachSession: vi.fn(async () => undefined),
+      title: stale,
+      setTitle,
+    }))
+    const { ctx } = makeHarness()
+    ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: 'dsh-wecom-single-000abcdef', cwd: '/tmp/wecom-test/WeCom-example-user-0821-abcdef' },
+    ])
+    ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+      name === 'workspaceRegistry' ? { create } : undefined,
+    )
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+
+    expect(setTitle).toHaveBeenCalledOnce()
+    const next = setTitle.mock.calls[0]?.[0] as unknown as string
+    expect(next).not.toBe(stale)
+    expect(next).toMatch(/^WeCom · /)
+  })
+
+  it('leaves an up-to-date workspace row title alone', async () => {
+    let created:
+      | { attachSession: ReturnType<typeof vi.fn>; setTitle: ReturnType<typeof vi.fn> }
+      | undefined
+    const create = vi.fn(async (_path: string, title?: string) => {
+      created = {
+        attachSession: vi.fn(async () => undefined),
+        setTitle: vi.fn(async () => undefined),
+      }
+      return { ...created, title }
+    })
+    const { ctx } = makeHarness()
+    ;(ctx.sessionPersistence.list as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: 'dsh-wecom-single-000abcdef', cwd: '/tmp/wecom-test/WeCom-example-user-0821-abcdef' },
+    ])
+    ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+      name === 'workspaceRegistry' ? { create } : undefined,
+    )
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.start()
+
+    expect(created?.setTitle).not.toHaveBeenCalled()
+  })
+
+  it('reconciles stale titles across every row, including historical epochs', async () => {
+    const staleSet = vi.fn(async (_title: string) => undefined)
+    const freshSet = vi.fn(async (_title: string) => undefined)
+    const foreignSet = vi.fn(async (_title: string) => undefined)
+    const rows = [
+      {
+        path: '/tmp/wecom-test/WeCom-example-user-0903-234934-563~g7',
+        title: 'WeCom · T32120019A 09-03 23:49:34',
+        setTitle: staleSet,
+      },
+      {
+        path: '/tmp/wecom-test/WeCom-example-user-0908-162049-63~g11',
+        title: 'WeCom · example-user 09-08 16:20:49',
+        setTitle: freshSet,
+      },
+      { path: '/tmp/elsewhere/A2A-xyz', title: 'A2A 版本 · xyz', setTitle: foreignSet },
+      // Another dsh-wecom instance's row (different workspace title prefix,
+      // same base cwd) must not be rewritten by this pool.
+      {
+        path: '/tmp/wecom-test/WeCom-weiqizhu-0910-161252-b3c626',
+        title: 'WeCom 版本管理 · T13150002A 09-10 16:12:52',
+        setTitle: foreignSet,
+      },
+    ]
+    const { ctx } = makeHarness()
+    ;(ctx.get as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+      name === 'workspaceRegistry' ? { list: () => rows, create: vi.fn() } : undefined,
+    )
+    const manager = new AgentPool(ctx as never, testConfig())
+    await manager.reconcileWorkspaceTitles()
+
+    expect(staleSet).toHaveBeenCalledOnce()
+    expect(staleSet.mock.calls[0]?.[0]).toBe('WeCom · example-user 09-03 23:49:34')
+    expect(freshSet).not.toHaveBeenCalled()
+    // A row outside this pool's cwd (A2A) must never be touched.
+    expect(foreignSet).not.toHaveBeenCalled()
   })
 
   it('a failing attach never fails the message itself', async () => {

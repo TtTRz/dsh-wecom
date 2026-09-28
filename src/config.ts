@@ -41,6 +41,96 @@ export function statusBaseOf(namespace: string): string {
   return namespace === 'default' ? '/api/wecom' : `/api/wecom-${sanitizeNamespace(namespace)}`
 }
 
+/**
+ * Enriched identity facts produced by an external resolver (Q2=A). These are
+ * OPTIONAL and absent unless a {@link WecomIdentityEnricher} service is mounted
+ * by another plugin (e.g. an imate/OpenClaw resolver). dsh-wecom never fills
+ * them itself; it only merges what the enricher returns into the current
+ * turn's {@link WecomIdentity} so the `wecomIdentity` service and the
+ * prompt section all read one place.
+ */
+export interface WecomResolvedIdentity {
+  /** Gongfeng username (RTX) resolved from the WeCom userid, when known. */
+  readonly rtx?: string
+  /** Numeric staff id parsed from the WeCom userid, when known. */
+  readonly staffId?: number
+  /** Human display name for the sender (falls back to userid when absent). */
+  readonly displayName?: string
+  /** Free-form extra facts the resolver wants to expose (kept scalar). */
+  readonly extra?: Record<string, string | number | boolean>
+}
+
+/**
+ * Identity facts of the WeCom sender driving the CURRENT turn, keyed by
+ * conversation session id. Present only while a WeCom-driven turn runs;
+ * a web-UI follow-up or a turn on another channel's agent has no entry,
+ * so identity-dependent behavior fails closed there.
+ */
+export interface WecomIdentity {
+  /** `from.userid` of the message that opened this turn. */
+  readonly userid: string
+  /** Chat scope of that message. */
+  readonly chattype: 'single' | 'group'
+  /** Group chat id when {@link chattype} is `group`. */
+  readonly chatid?: string
+  /**
+   * Enriched facts merged in from a {@link WecomIdentityEnricher} (Q2=A).
+   * `undefined` when no enricher is mounted or enrichment failed; readers must
+   * treat every field as optional.
+   */
+  readonly resolved?: WecomResolvedIdentity
+}
+
+/** Read access to a conversation's current-turn identity (absent outside a WeCom turn). */
+export interface WecomIdentityService {
+  snapshot(): WecomIdentity | undefined
+}
+
+/**
+ * Pluggable identity resolver seam (Q1=A, service pull). Another plugin
+ * provides an implementation under {@link wecomIdentityEnricherServiceName};
+ * dsh-wecom calls it once per turn right after the base {@link WecomIdentity}
+ * is built (still inside `driveTurn`, before the first prompt is assembled) and
+ * merges the returned facts into `identity.resolved`. The call is awaited, so
+ * resolvers may hit the network (e.g. OpenClaw `getUsername`). When no enricher
+ * is mounted, or it throws, the turn proceeds with the bare userid — zero
+ * behavior change for default deployments.
+ */
+export interface WecomIdentityEnricher {
+  /**
+   * Resolve extra identity facts for one inbound sender. Called with the base
+   * identity (userid/chattype/chatid already set, `resolved` still empty).
+   * Return the enriched facts, or `undefined` to leave `resolved` unset.
+   * Implementations should cache successes and must not throw for an
+   * unresolvable sender — resolve to `undefined` instead so the turn continues.
+   */
+  enrich(identity: WecomIdentity): Promise<WecomResolvedIdentity | undefined>
+  /**
+   * OPTIONAL synchronous, cache-only RTX lookup. When an enricher keeps a warm
+   * local `userid → rtx` cache, it can expose this so dsh-wecom's synchronous
+   * hot paths (directory naming, per-message sender labels) show the RTX for
+   * already-resolved senders without awaiting a network call. It MUST NOT hit
+   * the network: return the cached RTX on a hit, `undefined` on a miss (the
+   * caller then falls back to the userid and lets the async {@link enrich}
+   * warm the cache for next time). dsh-wecom duck-checks for this method, so
+   * enrichers without a cache simply omit it.
+   */
+  peekRtx?(userid: string): string | undefined
+}
+
+/**
+ * Service name under which an identity enricher publishes itself. Mirrors the
+ * {@link channelStatusServiceName} convention so a non-default channel row and
+ * its resolver can be namespaced together: the resolver mounts
+ * `wecomIdentityEnricher.<namespace>` for the row it enriches (or the bare
+ * `wecomIdentityEnricher` for the default row).
+ */
+export function wecomIdentityEnricherServiceName(namespace: string): string {
+  return namespace === 'default'
+    ? 'wecomIdentityEnricher'
+    : `wecomIdentityEnricher.${sanitizeNamespace(namespace)}`
+}
+
 /** Runtime-validated plugin configuration as declared in a composition row. */
 export interface Config {
   botId: string

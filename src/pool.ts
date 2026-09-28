@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -19,7 +19,13 @@ import type {} from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import type { BaseMessage, Logger } from '@wecom/aibot-node-sdk'
-import type { ResolvedConfig } from './config.js'
+import type {
+  ResolvedConfig,
+  WecomIdentity,
+  WecomIdentityEnricher,
+  WecomIdentityService,
+} from './config.js'
+import { wecomIdentityEnricherServiceName } from './config.js'
 import { clipUtf8, conversationId, Semaphore } from './helpers.js'
 import { type MediaPort, safeFilename, saveUploadFile } from './media.js'
 import { containsImageMedia, toContentBlocks } from './message.js'
@@ -50,14 +56,40 @@ export interface Reply {
   images?: ImageAttachmentRef[]
 }
 
+/**
+ * One historical session of a WeCom conversation, projected for the `/session`
+ * and `/current` commands. Every `/new` mints the next epoch (`base~gN`) while
+ * the older sessions stay persisted, so a chat accumulates one row per epoch.
+ */
+export interface SessionView {
+  /** Epoch number: 0 is the original session, N the `~gN` reset epoch. */
+  epoch: number
+  /** Full session id (base or `base~gN`). */
+  sessionId: string
+  /** Creation time (epoch ms) from the persisted header, null when unknown. */
+  createdAt: number | null
+  /** Latest session title, when the log could be read. */
+  title?: string
+  /** Completed turns in the log, null when the log could not be read. */
+  turns: number | null
+  /** Whether new messages of this chat currently route to this session. */
+  current: boolean
+}
+
 /** Structural face of a workspace entity (absent outside web profiles). */
 interface WorkspaceLike {
   attachSession(sessionId: string): Promise<void>
+  /** Canonical directory of the row (present on the harness's entity). */
+  path?: string
+  /** Durable sidebar title; may be absent on a minimal structural registry. */
+  title?: string
+  /** Refresh the durable title (present on the harness's workspace entity). */
+  setTitle?(title: string): Promise<unknown>
 }
 interface WorkspaceRegistryLike {
   create(path: string, title?: string): Promise<WorkspaceLike>
-  /** Structural face of the workspace entity list, used by the deletion watcher. */
-  list?(): { path?: string }[]
+  /** The workspace entity list (the deletion watcher and title reconcile read it). */
+  list?(): WorkspaceLike[]
 }
 
 /** Structural face of the optional `sessionTitle` service. */
@@ -264,7 +296,7 @@ export class ApprovalBridge {
 
   /** The audit `approval/asked` id for this ask, from the session log tail. */
   private approvalIdOf(req: ApprovalRequestLike): string | undefined {
-    const events = req.agent.session.events as readonly {
+    const events = liveEvents(req.agent.session) as readonly {
       type?: string
       data?: { id?: unknown; callId?: unknown }
     }[]
@@ -316,6 +348,179 @@ function stripEpoch(id: string): string {
   return id.replace(/~g\d+$/, '')
 }
 
+/**
+ * The epoch number of one session id within one conversation base, when it
+ * belongs to it: the bare base id is epoch 0, `base~gN` is epoch N, anything
+ * else (another chat, another scope) is `undefined`.
+ */
+function epochOfId(base: string, id: string): number | undefined {
+  if (id === base) return 0
+  if (!id.startsWith(`${base}~g`)) return undefined
+  const suffix = id.slice(base.length + 2)
+  if (!/^\d+$/.test(suffix)) return undefined
+  return Number(suffix)
+}
+
+/**
+ * Derive the human-readable sidebar suffix from one per-chat directory name:
+ * `WeCom-{peer}-{MMDD}-{HHmmss}-{tail6}[~gN]` → `{peer} MM-DD HH:mm:ss`. Used
+ * for both the canonical title of a live conversation and the reconcile pass
+ * that repairs a row whose stored title predates a peer-label change.
+ */
+function shortIdOfDir(dir: string): string {
+  const stripped = dir.replace(/^WeCom-/, '').replace(/-[^-]*$/, '')
+  const m = /^(.+)-(\d{4})-(\d{2})(\d{2})(\d{2})$/.exec(stripped)
+  if (
+    m === null ||
+    m[1] === undefined ||
+    m[2] === undefined ||
+    m[3] === undefined ||
+    m[4] === undefined ||
+    m[5] === undefined
+  ) {
+    return stripped
+  }
+  return `${m[1]} ${m[2].slice(0, 2)}-${m[2].slice(2)} ${m[3]}:${m[4]}:${m[5]}`
+}
+
+/**
+ * Upper bound on the pre-mint RTX lookup for a brand-new conversation. The
+ * identity enricher's own request timeout is much longer (10s default); a chat
+ * must not wait that long for its first reply, so the lookup is raced against
+ * this cap and the message proceeds with the raw userid on a slow resolver
+ * (the in-flight resolution still warms the cache for the next message).
+ */
+const PEER_RESOLVE_TIMEOUT_MS = 2_500
+
+/** Await `promise` for at most `ms`; a late result/rejection is ignored. */
+async function withTimeout(promise: Promise<unknown>, ms: number): Promise<void> {
+  let timer: NodeJS.Timeout | undefined
+  try {
+    await Promise.race([
+      promise.catch(() => undefined),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, ms)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
+/**
+ * Read a LIVE session's events across harness versions.
+ *
+ * The harness renamed the accessor: `@deepseek-ai/dsh-session` 0.1.0-rc.6
+ * exposed a `session.events` getter; 0.1.5-rc.2 replaced it with
+ * `session.snapshotEvents()`. This package's pinned types are the OLDER ones,
+ * so `session.events` still type-checks while the RUNTIME (the deployment's
+ * newer package) answers `undefined` — the source of the
+ * "Cannot read properties of undefined (reading 'length')" crash on the first
+ * turn of every conversation after the 2026-09-11 harness upgrade. Prefer the
+ * new accessor and fall back to the old getter, so either runtime works.
+ */
+export function liveEvents(session: unknown): readonly SessionEvent[] {
+  const target = session as
+    | {
+        snapshotEvents?: () => readonly SessionEvent[]
+        events?: readonly SessionEvent[]
+      }
+    | null
+    | undefined
+  if (target === null || target === undefined) return []
+  if (typeof target.snapshotEvents === 'function') return target.snapshotEvents()
+  return target.events ?? []
+}
+
+/**
+ * Subscribe to one agent-scoped harness event whose NAME this package's pinned
+ * types do not know yet — the same version-lag situation {@link liveEvents}
+ * handles, applied to the event map instead of the session accessor.
+ *
+ * `agent/assistant-stream` (the live model-delta feed) arrived in
+ * `@deepseek-ai/dsh-agent` 0.1.5-rc.2, while this package pins 0.1.0-rc.6, so
+ * `ctx.on('agent/assistant-stream', …)` is rejected as an unknown `keyof
+ * Events` even though the running harness emits it. The subscription therefore
+ * goes through a structural shape rather than the typed map. Returns a
+ * disposer; a context without `on` yields a no-op one.
+ */
+function onAgentEvent(
+  ctx: unknown,
+  event: string,
+  handler: (payload: unknown) => void,
+): () => void {
+  const target = ctx as
+    | { on?: (name: string, fn: (payload: unknown) => void) => () => void }
+    | null
+    | undefined
+  if (typeof target?.on !== 'function') return () => undefined
+  return target.on(event, handler)
+}
+
+/**
+ * Whether an error is the "session identity already taken" collision raised by
+ * the session store (a plain message) or the persistence backend (a named
+ * `SessionAlreadyExistsError`). Used to fall back from `create` to `resume`
+ * instead of failing the turn.
+ */
+function isAlreadyExistsError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false
+  const name = (error as { name?: unknown }).name
+  if (name === 'SessionAlreadyExistsError') return true
+  const message = (error as { message?: unknown }).message
+  return typeof message === 'string' && /already exists/i.test(message)
+}
+
+/**
+ * Whether an error is the CROSS-DRIVER contention window, not a real failure.
+ *
+ * `dsh-agent-loop`'s `resume` opens the persisted session for WRITE first and
+ * only registers the agent afterwards (`open(id,'write')` → cold read →
+ * prepare → `setupAndPublish`). Every driver's "adopt the live agent" guard is
+ * `ctx.agents.get(sessionId)`, so while one driver sits inside that window the
+ * guard misses for ALL of them and the next `open(id,'write')` throws
+ * `SessionAlreadyOwnedError` (the persistence backend's in-process writer map).
+ * A same-session `prepare` can also report "cannot prepare … while it is live".
+ * Both mean "someone else is opening it right now" — retry, do not fail.
+ */
+function isSessionContentionError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false
+  if ((error as { name?: unknown }).name === 'SessionAlreadyOwnedError') return true
+  const message = (error as { message?: unknown }).message
+  if (typeof message !== 'string') return false
+  return (
+    /already owned by an active write handle/i.test(message) || /while it is live/i.test(message)
+  )
+}
+
+/** Backoff before re-attempting a session open that lost the cross-driver race. */
+const SESSION_CONTENTION_RETRY_MS = [150, 300, 600, 1_200]
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+
+/**
+ * Fold one session log to its display facts: the latest non-empty title and
+ * the completed-turn count. Events are read structurally (the title event is
+ * contributed by the session-title plugin, not the core event map).
+ */
+function summarizeSessionLog(events: readonly unknown[]): { title?: string; turns: number } {
+  let title: string | undefined
+  let turns = 0
+  for (const raw of events) {
+    const type = (raw as { type?: unknown }).type
+    if (type === 'turn/end') {
+      turns += 1
+    } else if (type === 'session/title') {
+      const value = (raw as { data?: { title?: unknown } }).data?.title
+      if (typeof value === 'string' && value.trim() !== '') title = value
+    }
+  }
+  return title === undefined ? { turns } : { title, turns }
+}
+
 /** Structural face of the harness approval request (agent, tool, signal). */
 interface ApprovalRequestLike {
   agent: { session: { id: unknown; events: unknown } }
@@ -357,6 +562,15 @@ export class AgentPool {
   /** Stored session cwd per conversation id, loaded at start and updated on create. */
   private headerCwds = new Map<string, string>()
   /**
+   * Directory minted for a conversation id, keyed by the FULL session id.
+   * `conversationDir` mints from the wall clock, and nothing creates the
+   * directory until `openWorkspace` runs later in the same turn — so without
+   * this cache a second call after the clock ticks would name a DIFFERENT
+   * directory than the session's header cwd (the session then matches no
+   * workspace and lands in Ungrouped, with an empty workspace row).
+   */
+  private readonly dirCache = new Map<string, string>()
+  /**
    * Per-chat directories whose workspace row the user deleted in the web UI.
    * Tombstones are recorded by a runtime watcher and persisted in the state
    * file; `start()` regrouping skips them so deleted rows stay deleted across
@@ -374,6 +588,17 @@ export class AgentPool {
    * `wireApprovals` before any turn can run.
    */
   private approvalPush: ((sessionId: string, text: string) => Promise<void>) | undefined
+  /**
+   * Sender identity of the WeCom turn currently running on each conversation
+   * session id, present only for the duration of {@link driveTurn}. Read by
+   * the agent-scoped `wecomIdentity` service and the identity prompt
+   * section — both see the CURRENT turn's facts. A
+   * web-UI follow-up or a resumed session driven outside this pool has no
+   * entry, so identity-dependent behavior fails closed there.
+   */
+  private readonly turnIdentities = new Map<string, WecomIdentity>()
+  /** Agent contexts already carrying the identity seams (guard + section + service). */
+  private readonly identitySeams = new WeakSet<object>()
 
   constructor(
     private readonly ctx: Context,
@@ -414,6 +639,21 @@ export class AgentPool {
     }
     await mkdir(this.config.cwd, { recursive: true })
     this.loadState()
+    // Repair stale sidebar titles for EVERY row — including historical `/new`
+    // epochs that will never receive another message, which `openWorkspace`
+    // (reached only for the session currently being messaged) cannot touch.
+    // The workspace registry may mount AFTER this plugin, so the bounded retry
+    // below is not a reliable trigger; `ctx.inject` runs the pass whenever the
+    // service appears.
+    // A minimal structural context (test doubles) may omit `inject`; the real
+    // cordis Context always has it.
+    if (typeof this.ctx.inject === 'function') {
+      this.ctx.inject(['workspaceRegistry'], () => {
+        void this.reconcileWorkspaceTitles().catch((error) => {
+          this.log.debug('WeCom workspace title reconcile failed: %s', String(error))
+        })
+      })
+    }
     for (let attempt = 0; attempt < 4; attempt += 1) {
       try {
         if (this.ctx.get('workspaceRegistry') !== undefined) break
@@ -577,7 +817,64 @@ export class AgentPool {
       this.reviveTombstone(id)
     }
     await mkdir(cwd, { recursive: true })
-    return registry.create(cwd, `${this.config.workspaceTitle} · ${this.shortId(id)}`)
+    const canonicalTitle = `${this.config.workspaceTitle} · ${this.shortId(id)}`
+    const workspace = await registry.create(cwd, canonicalTitle)
+    // `registry.create` returns an EXISTING row at that path UNTOUCHED, so a
+    // title minted before the peer label changed — a directory migrated from
+    // the raw userid to the RTX, or a row created while the RTX cache was cold
+    // — would stay stale in the sidebar forever. Refresh it to the canonical
+    // label derived from the directory name. Best-effort: a registry without
+    // `setTitle` (or a failed write) must never fail the message.
+    if (
+      typeof workspace.setTitle === 'function' &&
+      workspace.title !== undefined &&
+      workspace.title !== canonicalTitle
+    ) {
+      try {
+        await workspace.setTitle(canonicalTitle)
+      } catch (error) {
+        this.log.debug('WeCom workspace title refresh failed: %s', String(error))
+      }
+    }
+    return workspace
+  }
+
+  /**
+   * Repair every stale per-chat workspace row title.
+   *
+   * `openWorkspace` only touches the row of the session currently being
+   * messaged, so a HISTORICAL epoch row (an older `/new` generation that will
+   * never receive another message) keeps whatever title it was minted with —
+   * e.g. the raw userid, before the directory was migrated to the peer's RTX.
+   * This pass walks the whole registry and rewrites any row under this pool's
+   * cwd whose title differs from the canonical label its directory implies.
+   *
+   * Best-effort and idempotent: a registry without `list`/`setTitle`, an
+   * unrelated row, or a failed write is skipped.
+   */
+  async reconcileWorkspaceTitles(): Promise<void> {
+    const registry = this.ctx.get('workspaceRegistry') as WorkspaceRegistryLike | undefined
+    if (registry?.list === undefined) return
+    // Scope by THIS row's workspace title prefix: several dsh-wecom instances
+    // share one base cwd (mp-perf + mp-publish both run under
+    // ~/.wecom-sessions), so the path alone cannot tell whose row it is. The
+    // prefix is already canonical; only the peer suffix needs repairing.
+    const prefix = `${this.config.workspaceTitle} · `
+    for (const workspace of registry.list()) {
+      const path = workspace.path
+      if (typeof path !== 'string' || !path.startsWith(this.config.cwd)) continue
+      const dir = path.split('/').pop() ?? ''
+      if (!dir.startsWith('WeCom-')) continue
+      if (workspace.title === undefined || !workspace.title.startsWith(prefix)) continue
+      const canonicalTitle = `${prefix}${shortIdOfDir(dir)}`
+      if (workspace.title === canonicalTitle) continue
+      if (typeof workspace.setTitle !== 'function') continue
+      try {
+        await workspace.setTitle(canonicalTitle)
+      } catch (error) {
+        this.log.debug('WeCom workspace title reconcile failed for %s: %s', dir, String(error))
+      }
+    }
   }
 
   /**
@@ -602,19 +899,7 @@ export class AgentPool {
    * distinguished by their timestamps alone.
    */
   private shortId(id: string): string {
-    const dir = this.conversationDir(id).split('/').pop() ?? ''
-    const stripped = dir.replace(/^WeCom-/, '').replace(/-[^-]*$/, '')
-    const m = /^(.+)-(\d{4})-(\d{2})(\d{2})(\d{2})$/.exec(stripped)
-    const pretty =
-      m !== null &&
-      m[1] !== undefined &&
-      m[2] !== undefined &&
-      m[3] !== undefined &&
-      m[4] !== undefined &&
-      m[5] !== undefined
-        ? `${m[1]} ${m[2].slice(0, 2)}-${m[2].slice(2)} ${m[3]}:${m[4]}:${m[5]}`
-        : stripped
-    return pretty
+    return shortIdOfDir(this.conversationDir(id).split('/').pop() ?? '')
   }
 
   /**
@@ -637,16 +922,40 @@ export class AgentPool {
     // Keyed by the FULL session id: each /reset epoch (its own session id,
     // ~gN suffix) mints a distinct directory, so every session gets its own
     // sandbox cwd and its own workspace row.
+    const cached = this.dirCache.get(id)
+    if (cached !== undefined) return cached
     const tail6 = id.slice(-6)
     const escaped = tail6.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     const pattern = new RegExp(`^WeCom-.*-${escaped}$`)
     try {
       const hit = readdirSync(this.config.cwd).find((name) => pattern.test(name))
-      if (hit !== undefined) return join(this.config.cwd, hit)
+      if (hit !== undefined) {
+        const adopted = join(this.config.cwd, hit)
+        this.dirCache.set(id, adopted)
+        return adopted
+      }
     } catch {
       // base not readable yet — fall through to mint a new name
     }
-    return join(this.config.cwd, `WeCom-${this.peerTag(id)}-${this.firstSeenStamp()}-${tail6}`)
+    // Mint ONCE and materialize the directory immediately. The workspace row is
+    // built from a LATER `conversationDir(id)` call (openWorkspace), and
+    // `firstSeenStamp()` reads the clock every time it runs: if that later call
+    // crossed a second boundary it would name a different directory than the
+    // one written into the session header, leaving the session Ungrouped next
+    // to an empty row. Creating the directory here also makes the name
+    // discoverable by the scan above on every later call and after a restart.
+    const minted = join(
+      this.config.cwd,
+      `WeCom-${this.peerTag(id)}-${this.firstSeenStamp()}-${tail6}`,
+    )
+    this.dirCache.set(id, minted)
+    try {
+      mkdirSync(minted, { recursive: true })
+    } catch {
+      // A failed pre-create must not fail the message: the cache above still
+      // pins this session to one name for the rest of the process.
+    }
+    return minted
   }
 
   /** Readable, filesystem-safe peer tag for the directory name. */
@@ -701,8 +1010,16 @@ export class AgentPool {
    */
   private rememberTitlePrefix(id: string, message: BaseMessage): void {
     if (this.titlePrefixes.has(id)) return
-    const prefix =
-      message.chattype === 'group' ? (message.chatid ?? message.from.userid) : message.from.userid
+    // Single chats prefer the sender's resolved RTX for the peer label (and
+    // therefore the per-chat directory name + workspace row). peekRtxFor is a
+    // synchronous cache-only lookup: it returns the RTX for an already-seen
+    // sender and falls back to the raw userid on a cache miss (warming the
+    // cache in the background so the next message shows the RTX). Group chats
+    // keep the chatid — there is no per-group RTX. New conversations only:
+    // the early-return above leaves existing prefixes (and their directories)
+    // untouched, so live sessions never move.
+    const singlePeer = this.peekRtxFor(message.from.userid) ?? message.from.userid
+    const prefix = message.chattype === 'group' ? (message.chatid ?? singlePeer) : singlePeer
     this.titlePrefixes.set(id, prefix)
     const base = this.baseId(id)
     if (this.peers.get(base) !== prefix) {
@@ -745,7 +1062,7 @@ export class AgentPool {
     if (kind === 'user') {
       let canonical = this.canonicalTitles.get(id)
       if (canonical === undefined) {
-        canonical = this.previousTitle(session.events, event.seq) ?? title
+        canonical = this.previousTitle(liveEvents(session), event.seq) ?? title
       }
       this.canonicalTitles.set(id, canonical)
       if (title !== canonical) this.renameSession(session, canonical)
@@ -808,6 +1125,13 @@ export class AgentPool {
   ): Promise<Reply> {
     const { base, id } = this.locate(message)
     const target = this.skipArchived(base, id)
+    // Preempt (插队): a new message interrupts any RUNNING turn of this
+    // conversation. `agent.cancel` makes the in-flight turn settle promptly
+    // (its `settleTurn` waits on `whenIdle`), so the new message is driven
+    // right after instead of queueing behind a long analysis. Different
+    // conversations stay independent (bounded by maxConcurrent).
+    const agent = this.agents.get(target)?.agent ?? this.ctx.agents.get(SessionId(target))
+    if (agent !== undefined && agent.status !== 'idle') agent.cancel({ kind: 'user' })
     const previous = this.chains.get(target) ?? Promise.resolve()
     const current = previous
       .catch(() => undefined)
@@ -865,22 +1189,104 @@ export class AgentPool {
     }
   }
 
-  /** Drop the current conversation; the next message starts a fresh session. */
-  async forget(message: BaseMessage): Promise<void> {
+  /**
+   * Drop the current conversation; the next message starts a fresh session.
+   * Returns the minted epoch number so the caller can name it in its reply.
+   * The fresh epoch is one past the HIGHEST epoch ever minted for this chat —
+   * after `/resume` rewinds the routing pointer to an older epoch, a naive
+   * "current + 1" would collide with (and silently continue) an existing
+   * session instead of starting a new one.
+   */
+  async forget(message: BaseMessage): Promise<number> {
     const base = conversationId(this.config.namespace, message)
-    const nextEpoch = (this.epochs.get(base) ?? 0) + 1
+    const currentEpoch = this.epochs.get(base) ?? 0
+    const nextEpoch = (await this.maxEpochOf(base)) + 1
     this.epochs.set(base, nextEpoch)
     this.saveState()
-    const oldId = this.withEpoch(base, nextEpoch - 1)
+    const oldId = this.withEpoch(base, currentEpoch)
     const handle = this.agents.get(oldId)
-    if (handle === undefined) return
-    this.agents.delete(oldId)
+    if (handle !== undefined) this.agents.delete(oldId)
     // Deliberately NOT disposing the old agent: a disposed session leaves the
     // host's live-session projection (host/session-removed), which erases its
     // row content from the sidebar even though the log and workspace row are
     // intact. Keeping the agent live keeps the previous conversation visible
     // and resumable while the fresh epoch starts clean; the handle's own
     // dispose stays wired into the pool's teardown for shutdown.
+    return nextEpoch
+  }
+
+  /**
+   * Every historical session of this chat's conversation (its base id plus
+   * all `~gN` epochs), newest first. Reads fresh persistence headers at
+   * command time, so sessions minted by earlier process runs are included.
+   */
+  async listSessions(message: BaseMessage): Promise<SessionView[]> {
+    const base = conversationId(this.config.namespace, message)
+    const currentEpoch = this.epochs.get(base) ?? 0
+    const rows: Array<{ id: string; epoch: number; createdAt: number | null }> = []
+    for (const header of await this.ctx.sessionPersistence.list()) {
+      const id = String(header.id)
+      const epoch = epochOfId(base, id)
+      if (epoch === undefined) continue
+      const createdAt = typeof header.createdAt === 'number' ? header.createdAt : null
+      rows.push({ id, epoch, createdAt })
+    }
+    rows.sort((a, b) => b.epoch - a.epoch)
+    const views: SessionView[] = []
+    for (const row of rows) {
+      views.push(
+        await this.describeSession(row.id, row.epoch, row.createdAt, row.epoch === currentEpoch),
+      )
+    }
+    return views
+  }
+
+  /** The session new messages of this chat currently route to, when it exists. */
+  async currentSession(message: BaseMessage): Promise<SessionView | undefined> {
+    const base = conversationId(this.config.namespace, message)
+    const epoch = this.epochs.get(base) ?? 0
+    const id = this.withEpoch(base, epoch)
+    const headers = await this.ctx.sessionPersistence.list()
+    const header = headers.find((h) => String(h.id) === id)
+    if (header === undefined) return undefined
+    const createdAt = typeof header.createdAt === 'number' ? header.createdAt : null
+    return this.describeSession(id, epoch, createdAt, true)
+  }
+
+  /**
+   * Switch this chat's routing pointer to one historical epoch (`/resume`).
+   * The argument is the epoch number shown by `/session` (0 = the original
+   * session). Only sessions that actually exist and are visible (not archived
+   * in the web UI) may be resumed; the selection is persisted to the state
+   * file, so it survives restarts like `/new` does. A running turn on the
+   * previous session is left alone — the switch applies from the next
+   * message on.
+   */
+  async resumeSession(message: BaseMessage, arg: string): Promise<string> {
+    const base = conversationId(this.config.namespace, message)
+    const trimmed = arg.trim()
+    if (!/^\d+$/.test(trimmed)) {
+      return '/resume <编号> — 切换到历史 session；编号见 /session 列表。'
+    }
+    const epoch = Number(trimmed)
+    if (epoch === (this.epochs.get(base) ?? 0)) {
+      return `当前就是 session #${epoch}。`
+    }
+    const id = this.withEpoch(base, epoch)
+    const exists = (await this.ctx.sessionPersistence.list()).some(
+      (header) => String(header.id) === id,
+    )
+    if (!exists) {
+      return `没有编号为 ${epoch} 的 session；发送 /session 查看可恢复的历史列表。`
+    }
+    if (this.isArchived(id)) {
+      return `session #${epoch} 已在网页端归档，无法恢复；可发送 /new 开新会话。`
+    }
+    this.epochs.set(base, epoch)
+    this.saveState()
+    const { title } = await this.describeLog(id)
+    const suffix = title === undefined ? '' : `（${title}）`
+    return `已切换到 session #${epoch}${suffix}；后续消息将继续该会话，/new 可再开新会话。`
   }
 
   /** Tear down every agent once queued turns have settled. */
@@ -890,6 +1296,73 @@ export class AgentPool {
     await Promise.allSettled(this.chains.values())
     await Promise.allSettled([...this.agents.values()].map((handle) => handle.dispose()))
     this.agents.clear()
+  }
+
+  /**
+   * Highest epoch ever minted for one conversation, over the routing pointer,
+   * the in-memory snapshot, and the FRESH persistence headers. Used by `/new`
+   * so a resumed (rewound) pointer never collides with an existing `~gN`
+   * session. The header read is what keeps `/new` from handing out an epoch
+   * whose session already exists on disk but is missing from the startup
+   * snapshot; every epoch seen there is folded back into the snapshot.
+   */
+  private async maxEpochOf(base: string): Promise<number> {
+    let max = this.epochs.get(base) ?? 0
+    const prefix = `${base}~g`
+    const consider = (id: string): void => {
+      if (!id.startsWith(prefix)) return
+      const n = Number(id.slice(prefix.length))
+      if (Number.isInteger(n) && n > max) max = n
+      this.persisted.add(id)
+    }
+    for (const id of this.persisted) consider(id)
+    try {
+      for (const header of await this.ctx.sessionPersistence.list()) {
+        consider(String(header.id))
+      }
+    } catch {
+      // Persistence unavailable/transient: fall back to the in-memory view.
+    }
+    return max
+  }
+
+  /** Assemble one `/session` row: header facts plus log-derived title/turns. */
+  private async describeSession(
+    id: string,
+    epoch: number,
+    createdAt: number | null,
+    current: boolean,
+  ): Promise<SessionView> {
+    const log = await this.describeLog(id)
+    return {
+      epoch,
+      sessionId: id,
+      createdAt,
+      ...(log.title === undefined ? {} : { title: log.title }),
+      turns: log.turns,
+      current,
+    }
+  }
+
+  /**
+   * Title and turn count of one session, read from the live agent's events
+   * when it is open, else inspected from persistence. A cold inspection reads
+   * the whole log, so it is bounded by a timeout; any failure degrades to
+   * "no title / unknown turns" instead of failing the command.
+   */
+  private async describeLog(id: string): Promise<{ title?: string; turns: number | null }> {
+    const live = this.agents.get(id)?.agent ?? this.ctx.agents.get(SessionId(id))
+    if (live !== undefined)
+      return summarizeSessionLog(liveEvents(live.session) as readonly unknown[])
+    try {
+      const inspection = await this.ctx.sessionPersistence.inspect(
+        SessionId(id),
+        AbortSignal.timeout(3_000),
+      )
+      return summarizeSessionLog(inspection.events as readonly unknown[])
+    } catch {
+      return { turns: null }
+    }
   }
 
   private locate(message: BaseMessage): { base: string; id: string } {
@@ -1023,6 +1496,11 @@ export class AgentPool {
   private async liveAgentForTurn(id: string, message: BaseMessage): Promise<Agent> {
     // Record the peer BEFORE ensuring the agent: the per-chat directory name
     // (minted inside ensureAgent) wants the readable peer id, and this is the
+    // Resolve the sender's RTX BEFORE the peer label — and therefore the
+    // per-chat directory — is minted, so a cold cache no longer bakes the raw
+    // userid into a brand-new conversation's directory name. Bounded, and a
+    // no-op for every later turn and every existing conversation.
+    await this.primePeerForNewConversation(id, message)
     // only place the raw message is in hand.
     this.rememberTitlePrefix(id, message)
     for (;;) {
@@ -1032,30 +1510,88 @@ export class AgentPool {
     }
   }
 
+  /**
+   * Resolve a brand-new conversation's sender RTX before its peer label is
+   * minted, so `conversationDir` names the directory from the RTX instead of
+   * the raw userid.
+   *
+   * Only the FIRST message of a conversation that has no peer label yet pays
+   * the lookup, and only for single chats whose cache is cold — every later
+   * message early-returns. The wait is capped by
+   * {@link PEER_RESOLVE_TIMEOUT_MS}; on a miss or a slow resolver the message
+   * proceeds on the userid (the previous behavior) while the in-flight
+   * resolution still warms the cache for the next conversation.
+   */
+  private async primePeerForNewConversation(id: string, message: BaseMessage): Promise<void> {
+    if (message.chattype === 'group') return
+    if (this.titlePrefixes.has(id)) return
+    const base = this.baseId(id)
+    if (this.peers.has(base)) return
+    const userid = message.from.userid
+    if (userid === undefined || userid.length === 0) return
+    const enricher = this.identityEnricher()
+    if (enricher === undefined) return
+    try {
+      if (typeof enricher.peekRtx === 'function' && enricher.peekRtx(userid) !== undefined) return
+    } catch {
+      // A throwing synchronous cache probe must never block the message.
+      return
+    }
+    await withTimeout(this.enrichIdentity({ userid, chattype: 'single' }), PEER_RESOLVE_TIMEOUT_MS)
+  }
+
   private async driveTurn(
     agent: Agent,
     message: BaseMessage,
     download: MediaPort['download'],
     onDelta?: (delta: TurnDelta) => void,
   ): Promise<Reply> {
-    const start = agent.session.events.length
+    const start = liveEvents(agent.session).length
     const reasoning: string[] = []
     const pendingCalls = new Map<string, { name: string; arguments: string }>()
     const toolCalls: ToolCallSummary[] = []
     const images: ImageAttachmentRef[] = []
+    // Forward one model delta to the streaming sink and, for reasoning, to the
+    // final process summary. Both delta sources below funnel through here so
+    // the two harness generations behave identically.
+    const applyDelta = (chunk: { type?: string; text?: string }): void => {
+      if (chunk.type === 'text-delta' && chunk.text) {
+        onDelta?.({ kind: 'text', text: chunk.text })
+      } else if (chunk.type === 'reasoning-delta' && chunk.text) {
+        reasoning.push(chunk.text)
+        onDelta?.({ kind: 'reasoning', text: chunk.text })
+      }
+    }
+    // Live model deltas ride the transient `agent/assistant-stream` event on the
+    // current harness (0.1.5-rc.2+): `session/event` no longer carries
+    // `assistant/chunk` at all, so subscribing there alone leaves the WeCom
+    // stream silent for the whole turn (only the final finish=true frame lands)
+    // and `reply.reasoning` empty. Scoped to the agent, so we see only its
+    // frames, and torn down with `offStream()` after the turn.
+    let sawStreamFrame = false
+    const offStream = onAgentEvent(agent.ctx, 'agent/assistant-stream', (raw) => {
+      const payload = raw as {
+        agent?: unknown
+        frame?: { type?: string; chunk?: { type?: string; text?: string } }
+      }
+      // Scope-filtered dispatch already limits this to the agent; keep the
+      // check for harnesses that broadcast the payload unscoped.
+      if (payload?.agent !== undefined && payload.agent !== agent) return
+      const frame = payload?.frame
+      if (frame?.type !== 'chunk') return
+      sawStreamFrame = true
+      if (frame.chunk !== undefined) applyDelta(frame.chunk)
+    })
     // Observe this agent's session firehose for the duration of the turn:
-    // forward text deltas for streaming and collect reasoning + tool activity
-    // for the optional final summary. Scoped to the agent, so we see only its
-    // events and the listener is torn down with `off()` after the turn.
+    // collect tool activity for the optional final summary, plus the card
+    // images tools produce. Scoped to the agent, so we see only its events and
+    // the listener is torn down with `off()` after the turn.
     const off = agent.ctx.on('session/event', (_session, event: SessionEvent) => {
       if (event.type === 'assistant/chunk') {
-        const chunk = event.data.chunk
-        if (chunk.type === 'text-delta' && chunk.text) {
-          onDelta?.({ kind: 'text', text: chunk.text })
-        } else if (chunk.type === 'reasoning-delta' && chunk.text) {
-          reasoning.push(chunk.text)
-          onDelta?.({ kind: 'reasoning', text: chunk.text })
-        }
+        // Legacy delta shape, still produced when a session log written by the
+        // V0 format is replayed. Ignored once real stream frames are seen so a
+        // harness emitting both cannot double-count a delta.
+        if (!sawStreamFrame) applyDelta(event.data.chunk)
       } else if (event.type === 'tool/call') {
         pendingCalls.set(event.data.callId, {
           name: event.data.name,
@@ -1081,19 +1617,44 @@ export class AgentPool {
         }
       }
     })
+    // Record the turn's sender identity BEFORE the first prompt assembly:
+    // the identity section renders from this entry and the `wecomIdentity`
+    // service snapshots it. Cleared in `finally` so a later web-UI follow-up
+    // (no WeCom turn) sees no sender identity.
+    const sessionId = String(agent.session.id)
+    const baseIdentity: WecomIdentity = {
+      userid: message.from.userid,
+      chattype: message.chattype === 'group' ? 'group' : 'single',
+      ...(message.chattype === 'group' && message.chatid !== undefined
+        ? { chatid: message.chatid }
+        : {}),
+    }
+    // Identity-enricher seam (Q1=A, service pull): if another plugin mounted a
+    // resolver under `wecomIdentityEnricher[.namespace]`, let it add resolved
+    // facts (rtx/staffId/displayName/...) before the identity is recorded and
+    // the first prompt is assembled. Awaiting here is safe — we are inside the
+    // async driveTurn, before followup. Any resolver failure is swallowed so
+    // the turn falls back to the bare userid (zero behavior change by default).
+    const identity = await this.enrichIdentity(baseIdentity)
+    this.turnIdentities.set(sessionId, identity)
     try {
       const includeImages = containsImageMedia(message) ? await this.canViewImages(agent) : false
       const content = await toContentBlocks(
         message,
-        this.mediaPort(download, String(agent.session.id)),
+        this.mediaPort(download, sessionId),
         includeImages,
+        (userid) => this.peekRtxFor(userid),
       )
       agent.followup(createUserMessage({ content, source: { kind: 'user' } }))
       await this.settleTurn(agent)
     } finally {
       off()
+      offStream()
+      if (this.turnIdentities.get(sessionId) === identity) {
+        this.turnIdentities.delete(sessionId)
+      }
     }
-    const reply = this.extractText(agent.session.events.slice(start))
+    const reply = this.extractText(liveEvents(agent.session).slice(start))
     if (reasoning.length > 0) reply.reasoning = reasoning.join('')
     if (toolCalls.length > 0) reply.toolCalls = toolCalls
     if (images.length > 0) reply.images = images
@@ -1102,11 +1663,16 @@ export class AgentPool {
 
   /**
    * Wait for the agent's turn to settle with a NO-PROGRESS timeout: the
-   * deadline resets on every session event (thinking deltas, tool calls,
-   * assistant text), so a long reasoning pass or a slow tool loop keeps the
-   * turn alive as long as it is demonstrably moving. Only a turn that goes
-   * silent for turnTimeoutMs is treated as stuck — cancelled so the next
-   * message is not queued behind work that will never finish.
+   * deadline resets on every session event AND every live model delta, so a
+   * long reasoning pass or a slow tool loop keeps the turn alive as long as it
+   * is demonstrably moving. Only a turn that goes silent for turnTimeoutMs is
+   * treated as stuck — cancelled so the next message is not queued behind work
+   * that will never finish.
+   *
+   * Both feeds are required: tool activity and step boundaries arrive on
+   * `session/event`, while a long reasoning pass with no tool call emits only
+   * `agent/assistant-stream` frames. Watching the session firehose alone would
+   * treat such a pass as silence and kill a working turn.
    */
   private async settleTurn(agent: Agent): Promise<void> {
     const limitMs = this.config.turnTimeoutMs
@@ -1128,6 +1694,9 @@ export class AgentPool {
     const off = agent.ctx.on('session/event', () => {
       arm()
     })
+    const offStream = onAgentEvent(agent.ctx, 'agent/assistant-stream', () => {
+      arm()
+    })
     arm()
     const watchIdle = agent.whenIdle().then(() => {
       if (!timedOut) settle?.()
@@ -1136,6 +1705,7 @@ export class AgentPool {
       await idle
     } finally {
       off()
+      offStream()
       if (timer !== undefined) clearTimeout(timer)
       void watchIdle.catch(() => undefined)
     }
@@ -1173,14 +1743,58 @@ export class AgentPool {
     const live = this.ctx.agents.get(sessionId)
     if (live !== undefined) {
       this.mountWecomInstructions(live)
+      this.mountIdentitySeams(live.ctx, id)
       return { agent: live, dispose: async () => undefined }
     }
 
     const agentOptions = this.modelOptions()
     const resolvedPreset = (await this.ctx.agentPresets.resolve(this.config.preset)).id
-    const setup = this.mountPreset(resolvedPreset)
+    const setup = this.mountPreset(resolvedPreset, id)
+    const exists = await this.sessionExists(id)
 
-    if (this.persisted.has(id)) {
+    // Cross-driver contention: the web UI's session controller prepares the
+    // SAME persisted session through the same `agents.resume` path. Both sides
+    // check `ctx.agents.get(sessionId)` before opening, but a resume only
+    // REGISTERS its agent after `open(id,'write')` → cold read → setup, so
+    // during that window the check misses on BOTH sides and the second `open`
+    // throws SessionAlreadyOwnedError. Retry with backoff, adopting the agent
+    // as soon as the other driver publishes it, and only then tell the user
+    // something actionable instead of leaking the raw error.
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await this.openAgentOnce(id, sessionId, agentOptions, resolvedPreset, setup, exists)
+      } catch (error) {
+        if (!isSessionContentionError(error)) throw error
+        const adopted = this.ctx.agents.get(sessionId)
+        if (adopted !== undefined) {
+          this.mountWecomInstructions(adopted)
+          this.mountIdentitySeams(adopted.ctx, id)
+          return { agent: adopted, dispose: async () => undefined }
+        }
+        const delay = SESSION_CONTENTION_RETRY_MS[attempt]
+        if (delay === undefined) {
+          throw new Error(
+            '该会话正被另一处同时使用（例如网页界面打开着同一会话），请稍后重试；若网页端正打开该会话，请先关闭它再试。',
+          )
+        }
+        await sleep(delay)
+      }
+    }
+  }
+
+  /**
+   * One resume/create attempt: resume an existing log, else create, and fall
+   * back to resume when a concurrent driver wins the create race.
+   */
+  private async openAgentOnce(
+    id: string,
+    sessionId: SessionId,
+    agentOptions: { provider: string; model: string },
+    resolvedPreset: string,
+    setup: AgentSetup,
+    exists: boolean,
+  ): Promise<AgentHandle> {
+    if (exists) {
       const handle = await this.ctx.agents.resume({
         resumeSessionId: sessionId,
         agentOptions,
@@ -1191,17 +1805,57 @@ export class AgentPool {
       return handle
     }
 
-    const handle = await this.ctx.agents.create({
-      sessionId,
-      meta: { cwd: this.conversationDir(id), agentPreset: resolvedPreset },
-      agentOptions,
-      setup,
-    })
-    this.inheritModelSelection(handle.agent)
-    this.persisted.add(id)
-    this.headerCwds.set(id, this.conversationDir(id))
-    await this.groupSession(id, this.conversationDir(id), { revive: true })
-    return handle
+    try {
+      const handle = await this.ctx.agents.create({
+        sessionId,
+        meta: { cwd: this.conversationDir(id), agentPreset: resolvedPreset },
+        agentOptions,
+        setup,
+      })
+      this.inheritModelSelection(handle.agent)
+      this.persisted.add(id)
+      this.headerCwds.set(id, this.conversationDir(id))
+      await this.groupSession(id, this.conversationDir(id), { revive: true })
+      return handle
+    } catch (error) {
+      // Collision: the session identity is already taken even though our
+      // existence probe said otherwise — e.g. a concurrent driver (the web UI,
+      // or another turn of this same conversation) materialized it between the
+      // probe and the create, or a previous create registered the session but
+      // failed before its bookkeeping ran. Heal the snapshot and adopt the
+      // existing log instead of failing every later message on this chat.
+      if (!isAlreadyExistsError(error)) throw error
+      this.persisted.add(id)
+      const handle = await this.ctx.agents.resume({
+        resumeSessionId: sessionId,
+        agentOptions,
+        setup,
+      })
+      this.inheritModelSelection(handle.agent)
+      await this.groupSession(id, this.headerCwds.get(id), { revive: true })
+      return handle
+    }
+  }
+
+  /**
+   * Whether one session identity already exists, from the in-memory snapshot
+   * first and the FRESH persistence headers otherwise. The snapshot is a
+   * startup-time cache that only grows on this pool's own successful creates,
+   * so trusting it alone made the pool call `create` on an existing `~gN`
+   * session ("session ... already exists") and, because the snapshot is only
+   * updated on success, never recover. A hit from the fresh read is folded
+   * back into the snapshot.
+   */
+  private async sessionExists(id: string): Promise<boolean> {
+    if (this.persisted.has(id)) return true
+    try {
+      const headers = await this.ctx.sessionPersistence.list()
+      const found = headers.some((header) => String(header.id) === id)
+      if (found) this.persisted.add(id)
+      return found
+    } catch {
+      return false
+    }
   }
 
   /**
@@ -1257,7 +1911,7 @@ export class AgentPool {
     }
   }
 
-  private mountPreset(presetId: string): AgentSetup {
+  private mountPreset(presetId: string, sessionId: string): AgentSetup {
     const instructions = this.config.instructions
     const presets = this.ctx.agentPresets
     return async (agentCtx: Context) => {
@@ -1268,6 +1922,127 @@ export class AgentPool {
         order: 50,
         text: instructions,
       })
+      this.mountIdentitySeams(agentCtx, sessionId)
+    }
+  }
+
+  /**
+   * Resolve the mounted identity enricher for this row's namespace, or
+   * `undefined` when none is mounted (or the lookup itself fails). Shared by
+   * {@link enrichIdentity} (async path) and {@link peekRtxFor} (sync path).
+   */
+  private identityEnricher(): WecomIdentityEnricher | undefined {
+    try {
+      return this.ctx.get(wecomIdentityEnricherServiceName(this.config.namespace)) as
+        | WecomIdentityEnricher
+        | undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Run the mounted identity enricher (if any) over one base identity and merge
+   * the resolved facts into `identity.resolved` (Q2=A). Returns the identity
+   * unchanged when no resolver is mounted under this row's namespace, or when
+   * the resolver returns `undefined` / throws — the turn then proceeds on the
+   * bare WeCom userid, which is the pre-seam behavior.
+   */
+  private async enrichIdentity(base: WecomIdentity): Promise<WecomIdentity> {
+    const enricher = this.identityEnricher()
+    if (enricher === undefined) return base
+    try {
+      const resolved = await enricher.enrich(base)
+      if (resolved === undefined) return base
+      return { ...base, resolved }
+    } catch (error) {
+      this.log.warn(
+        `identity enricher failed for userid=${base.userid}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      )
+      return base
+    }
+  }
+
+  /**
+   * Synchronous, cache-only RTX for one sender userid (the local-cache seam).
+   * When the mounted enricher exposes `peekRtx`, return its cached RTX for an
+   * already-resolved sender; otherwise `undefined`. Never touches the network,
+   * so it is safe on the synchronous message-intake path (directory naming,
+   * sender labels). A miss additionally kicks off a background {@link enrich}
+   * to warm the cache so the NEXT message from this sender resolves to the RTX.
+   */
+  private peekRtxFor(userid: string): string | undefined {
+    if (!userid) return undefined
+    const enricher = this.identityEnricher()
+    if (enricher === undefined || typeof enricher.peekRtx !== 'function') return undefined
+    try {
+      const hit = enricher.peekRtx(userid)
+      if (hit !== undefined) return hit
+    } catch {
+      return undefined
+    }
+    // Cache miss: warm it in the background (fire-and-forget) so the next
+    // message from this sender resolves synchronously. We build a minimal base
+    // identity here; enrich() only reads userid. Failures are swallowed by
+    // enrichIdentity's own guard.
+    void this.enrichIdentity({
+      userid,
+      chattype: 'single',
+    }).catch(() => undefined)
+    return undefined
+  }
+
+  /**
+   * Install the sender-identity seams on one agent's scoped context: the
+   * `wecomIdentity` service presets and plugins may read, and the
+   * `wecom-identity` prompt section telling the model who is talking
+   * (the message-source marker). Idempotent per context (the same live
+   * agent may be adopted more than once).
+   *
+   * The seams are registered on the agent's shared root scope, and the SAME
+   * conversation can reach this method through two different context objects —
+   * the preset setup (`agentCtx` on resume/create) and the live-agent adopt
+   * path (`live.ctx` in `openAgent`). The `identitySeams` WeakSet keys by
+   * context object, so it cannot dedupe across those two references; the
+   * `provide`/`section` calls below are therefore wrapped to swallow the
+   * duplicate-registration error, which simply means the seam is already in
+   * place (mirrors `mountWecomInstructions`).
+   */
+  private mountIdentitySeams(agentCtx: Context, sessionId: string): void {
+    if (this.identitySeams.has(agentCtx)) return
+    this.identitySeams.add(agentCtx)
+    const identity: WecomIdentityService = {
+      snapshot: () => this.turnIdentities.get(sessionId),
+    }
+    try {
+      agentCtx.provide('wecomIdentity', identity)
+    } catch (error) {
+      this.log.debug('wecomIdentity service already registered: %s', String(error))
+    }
+
+    try {
+      agentCtx.systemPrompt.section({
+        name: 'wecom-identity',
+        order: 49,
+        text: () => {
+          const current = this.turnIdentities.get(sessionId)
+          // Outside a WeCom-driven turn (web-UI follow-up on this session, or a
+          // session driven by another channel) the section renders empty.
+          if (current === undefined) return ''
+          // When an enricher resolved the sender's RTX, surface it so the model
+          // knows who is actually talking (and can attribute work / billing).
+          const who =
+            current.resolved?.rtx !== undefined
+              ? `当前企业微信用户 ${current.userid}（工蜂 ${current.resolved.rtx}）`
+              : `当前企业微信用户 ${current.userid}`
+          const scope = current.chattype === 'group' ? '群聊' : '单聊'
+          return `${who}，来自企微${scope}。`
+        },
+      })
+    } catch (error) {
+      this.log.debug('wecom-identity section already registered: %s', String(error))
     }
   }
 

@@ -18,7 +18,7 @@ Wire a WeCom AI Bot to DeepSeek Harness over the official long connection. Each 
 - 🧹 **Housekeeping** — msgid dedup, per-conversation queues, a global concurrency cap, and per-turn timeouts that cancel the turn instead of leaving zombies.
 - 📡 **Self-healing** — when the long connection dies (kicked, auth failure, replaced client), the channel restarts itself after `restartIntervalMs` (default 10s).
 - 🩺 **Observability** — a host-wide `wecomChannelStatus` service, a JSON route `GET /api/wecom/status`, a sidebar action with a live connection dot, and a floating status panel.
-- 💬 **Bot commands** — `/ping /help /status /stop /compact /new`.
+- 💬 **Bot commands** — `/ping /help /status /stop /compact /new /session /current /resume`.
 
 ## 🚀 Quick Start
 
@@ -154,6 +154,9 @@ dsh-web restart — the panel says so explicitly. Configure the patch path via
 | `/stop` | Cancel the current generation |
 | `/compact` | Summarize older history into a summary to save context |
 | `/new` | Start a fresh conversation (history kept; next message opens a new session) |
+| `/session` | List this chat's sessions newest-first (epoch, start time, turns, title; current marked `*`). Alias `/sessions` |
+| `/current` | Show the session new messages route to |
+| `/resume <n>` | Switch back to a past session by epoch number (see `/session`; persisted across restarts) |
 
 ## 🏗️ How it works
 

@@ -22,7 +22,14 @@ export const inject = [
 ]
 
 export type { ChannelStatus, ChannelStatusService } from './channel.js'
-export type { ResolvedConfig } from './config.js'
+export type {
+  ResolvedConfig,
+  WecomIdentity,
+  WecomIdentityEnricher,
+  WecomIdentityService,
+  WecomResolvedIdentity,
+} from './config.js'
+export { wecomIdentityEnricherServiceName } from './config.js'
 export { clipUtf8, conversationId, Dedupe, replyTarget, Semaphore, timeout } from './helpers.js'
 export { runChannelLoop } from './loop.js'
 export { addBot, DEFAULT_PATCH_PATH, editBot, listBots, removeBot } from './manage.js'
@@ -33,7 +40,8 @@ export {
   saveUploadFile,
 } from './media.js'
 export { containsImageMedia, toContentBlocks } from './message.js'
-export type { Reply, ToolCallSummary } from './pool.js'
+export type { Reply, SessionView, ToolCallSummary } from './pool.js'
+export { liveEvents } from './pool.js'
 export { channelStatusServiceName } from './status.js'
 export type { PluginConfig as ChannelConfig }
 export { Config, resolveCwd, sanitizeNamespace, statusBaseOf, WecomChannel }

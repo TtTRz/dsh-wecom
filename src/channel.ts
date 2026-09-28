@@ -1,3 +1,4 @@
+import { appendFileSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
@@ -8,6 +9,7 @@ import {
   generateReqId,
   type Logger,
   type ReplyMsgItem,
+  type WeComMediaType,
   WSAuthFailureError,
   WSClient,
   type WSClientOptions,
@@ -51,9 +53,9 @@ export interface BotClient {
   ): Promise<unknown>
   uploadMedia(
     fileBuffer: Uint8Array,
-    options: { type: 'image'; filename: string },
+    options: { type: WeComMediaType; filename: string },
   ): Promise<{ media_id: string }>
-  sendMediaMessage(chatid: string, mediaType: 'image', mediaId: string): Promise<unknown>
+  sendMediaMessage(chatid: string, mediaType: WeComMediaType, mediaId: string): Promise<unknown>
   downloadFile(url: string, aesKey?: string): Promise<{ buffer: Uint8Array; filename?: string }>
 }
 
@@ -80,7 +82,19 @@ export interface ChannelStatusService {
   reconnect?(): void
 }
 
-const COMMANDS = new Set(['/ping', '/help', '/status', '/stop', '/compact', '/new', '/clear'])
+const COMMANDS = new Set([
+  '/ping',
+  '/help',
+  '/status',
+  '/stop',
+  '/compact',
+  '/new',
+  '/clear',
+  '/session',
+  '/sessions',
+  '/current',
+  '/resume',
+])
 
 /**
  * Assemble one WeCom stream frame from reasoning and visible text. The WeCom
@@ -152,6 +166,25 @@ class StreamSink {
 function elideHead(value: string, max: number): string {
   const trimmed = value.trim()
   return trimmed.length <= max ? trimmed : `${trimmed.slice(0, max)}…`
+}
+
+/**
+ * Append one turn failure with its STACK to a file so a swallowed failure is
+ * diagnosable after the fact (the plugin logger does not reach the service
+ * journal). Path: `DSH_WECOM_ERROR_LOG` or `/tmp/dsh-wecom-error.log`.
+ * Best-effort — diagnostics must never break the reply path.
+ */
+function logTurnFailure(message: BaseMessage, error: unknown): void {
+  try {
+    const file = process.env.DSH_WECOM_ERROR_LOG ?? '/tmp/dsh-wecom-error.log'
+    const stack = error instanceof Error ? (error.stack ?? error.message) : String(error)
+    appendFileSync(
+      file,
+      `${new Date().toISOString()} msgid=${message.msgid} chattype=${message.chattype}\n${stack}\n\n`,
+    )
+  } catch {
+    /* diagnostics are best-effort */
+  }
 }
 
 /** Truncate to at most `max` characters, keeping the tail (most recent reasoning). */
@@ -395,9 +428,12 @@ export class WecomChannel {
       return
     }
 
-    const command = commandOf(message)
-    if (COMMANDS.has(command)) {
-      await this.onCommand(frame, message, command)
+    // Commands match on the FIRST token, so `/resume 2` dispatches like
+    // `/resume`; anything after the head becomes its argument string.
+    const commandText = commandOf(message)
+    const head = commandText.split(/\s+/)[0] ?? ''
+    if (COMMANDS.has(head)) {
+      await this.onCommand(frame, message, head, commandText.slice(head.length).trim())
       return
     }
 
@@ -429,7 +465,6 @@ export class WecomChannel {
       const finalText = clipUtf8(this.renderReply(reply), this.config.replyLimitBytes)
       try {
         await this.sendStream(frame, streamId, finalText, true)
-        await this.sendCardsAsImages(message, reply)
       } catch (streamError) {
         // The passive stream can die mid-turn (stream window expired — the
         // server answers a non-zero errcode such as 846608 — or the stream was
@@ -439,10 +474,27 @@ export class WecomChannel {
           'WeCom final stream reply failed (falling back to proactive push): %s',
           String(streamError),
         )
-        await this.pushToChatOf(message, finalText)
+        logTurnFailure(message, streamError)
+        try {
+          await this.pushToChatOf(message, finalText)
+        } catch (pushError) {
+          this.log.error('WeCom final stream push fallback failed: %s', String(pushError))
+        }
+      }
+      // Cards ship on their OWN path, after the text landed by whichever route
+      // succeeded. They must never sit inside the passive-stream try: a report
+      // turn routinely outlives the ~6-minute stream window (846608) while the
+      // card is rendered near the end, so a failed final frame used to skip
+      // every card — the user got the text and no image.
+      try {
+        await this.sendCardsAsImages(message, reply)
+      } catch (cardError) {
+        this.log.error('WeCom card image send failed: %s', String(cardError))
+        logTurnFailure(message, cardError)
       }
     } catch (error) {
       this.log.error('WeCom message %s failed: %s', message.msgid, String(error))
+      logTurnFailure(message, error)
       const detail = error instanceof Error ? error.message : String(error)
       try {
         await this.sendStream(
@@ -469,6 +521,7 @@ export class WecomChannel {
     frame: WsFrame<BaseMessage>,
     message: BaseMessage,
     command: string,
+    args: string,
   ): Promise<void> {
     const streamId = generateReqId('dsh')
     if (command === '/ping') {
@@ -488,6 +541,9 @@ export class WecomChannel {
           '/compact — summarize older history to save context',
           '/new — start a fresh conversation (history is kept)',
           '/clear — alias of /new (clear context, start fresh)',
+          "/session — list this chat's sessions (history kept by /new)",
+          '/current — show the current session',
+          '/resume <n> — switch back to a past session (see /session)',
           'Anything else goes to the current Harness default model.',
         ].join('\n'),
         true,
@@ -518,10 +574,76 @@ export class WecomChannel {
       await this.sendStream(frame, streamId, text, true)
       return
     }
-    if (command === '/new' || command === '/clear') {
-      await this.pool.forget(message)
-      await this.sendStream(frame, streamId, 'Started a new conversation.', true)
+    if (command === '/session' || command === '/sessions') {
+      await this.sendStream(frame, streamId, await this.renderSessionList(message), true)
+      return
     }
+    if (command === '/current') {
+      await this.sendStream(frame, streamId, await this.renderCurrentSession(message), true)
+      return
+    }
+    if (command === '/resume') {
+      await this.sendStream(frame, streamId, await this.pool.resumeSession(message, args), true)
+      return
+    }
+    if (command === '/new' || command === '/clear') {
+      const epoch = await this.pool.forget(message)
+      await this.sendStream(
+        frame,
+        streamId,
+        `Started a new conversation (#${epoch}). History is kept — /session lists it.`,
+        true,
+      )
+    }
+  }
+
+  /**
+   * `/session` reply: every historical session of this chat (one row per
+   * `/new` epoch), newest first, with the routing session marked. Bounded to
+   * 30 rows so a long-lived chat stays under the WeCom reply byte cap.
+   */
+  private async renderSessionList(message: BaseMessage): Promise<string> {
+    const views = await this.pool.listSessions(message)
+    if (views.length === 0) {
+      return '还没有历史 session；直接发送消息即可开始对话。'
+    }
+    const cap = 30
+    const lines = views.slice(0, cap).map((view) => {
+      const facts = [this.formatWhen(view.createdAt)]
+      if (view.turns !== null) facts.push(`${view.turns} 轮`)
+      facts.push(view.title?.trim() || '（无标题）')
+      return `${view.current ? '*' : ' '} #${view.epoch}  ${facts.join(' · ')}`
+    })
+    const overflow =
+      views.length > cap ? [`…另有 ${views.length - cap} 个更早的 session 未列出`] : []
+    return [
+      `本会话共 ${views.length} 个 session（新→旧，* 为当前）：`,
+      ...lines,
+      ...overflow,
+      '发送 /resume <编号> 切换到历史 session；/new 开新会话。',
+    ].join('\n')
+  }
+
+  /** `/current` reply: one line about the session new messages route to. */
+  private async renderCurrentSession(message: BaseMessage): Promise<string> {
+    const view = await this.pool.currentSession(message)
+    if (view === undefined) {
+      return '当前还没有 session；直接发送消息即可开始对话（/session 可查看历史）。'
+    }
+    const facts = [`#${view.epoch}`]
+    const when = this.formatWhen(view.createdAt)
+    if (when !== '') facts.push(`开始于 ${when}`)
+    if (view.turns !== null) facts.push(`${view.turns} 轮`)
+    if (view.title !== undefined && view.title.trim() !== '') facts.push(view.title.trim())
+    return `当前 session：${facts.join(' · ')}\n发送 /session 查看本聊天全部历史。`
+  }
+
+  /** `MM-DD HH:mm` in server-local time, or '' when the time is unknown. */
+  private formatWhen(createdAt: number | null): string {
+    if (createdAt === null) return ''
+    const d = new Date(createdAt)
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
   }
 
   private permits(message: BaseMessage): boolean {
@@ -720,17 +842,28 @@ function stripEpochOf(id: string): string {
 }
 
 function commandOf(message: BaseMessage): string {
-  if (message.msgtype === 'text') return message.text?.content?.trim().toLowerCase() ?? ''
-  if (message.msgtype !== 'mixed') return ''
-  const mixed = message.mixed as
-    | {
-        msg_item?: Array<{ msgtype?: string; text?: { content?: string } }>
-      }
-    | undefined
-  return (mixed?.msg_item ?? [])
-    .filter((item) => item.msgtype === 'text')
-    .map((item) => item.text?.content ?? '')
-    .join('')
-    .trim()
-    .toLowerCase()
+  const raw =
+    message.msgtype === 'text'
+      ? (message.text?.content ?? '')
+      : message.msgtype !== 'mixed'
+        ? ''
+        : (
+            (
+              message.mixed as
+                | {
+                    msg_item?: Array<{ msgtype?: string; text?: { content?: string } }>
+                  }
+                | undefined
+            )?.msg_item ?? []
+          )
+            .filter((item) => item.msgtype === 'text')
+            .map((item) => item.text?.content ?? '')
+            .join('')
+  // Group messages arrive addressed to the bot as "@BotName /cmd …"; the first
+  // whitespace token is then the mention, not the command, so a naive
+  // split-and-match never recognizes it. Strip ONE leading @mention token
+  // (mirrors the hermes adapter) so slash commands work in group chats. Single
+  // chats carry no mention, so the strip is a no-op there.
+  const text = message.chattype === 'group' ? raw.replace(/^@\S+\s*/, '') : raw
+  return text.trim().toLowerCase()
 }

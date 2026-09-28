@@ -36,6 +36,7 @@ export function testConfig(overrides: Partial<Config> = {}): ResolvedConfig {
     dedupeLimit: 100,
     maxConcurrent: 4,
     restartIntervalMs: 100,
+    aggregateBots: [],
     ...overrides,
   }
 }

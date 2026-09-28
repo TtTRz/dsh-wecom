@@ -1,4 +1,6 @@
-import { describe, expect, it, vi } from 'vitest'
+import { rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { type BotClient, buildStreamContent, WecomChannel } from '../src/channel.js'
 import { testConfig } from './test-config.js'
 
@@ -154,6 +156,12 @@ describe('WecomChannel status', () => {
 })
 
 describe('WecomChannel streaming', () => {
+  beforeEach(() => {
+    // Command routing (epochs) persists to a state file under the test cwd;
+    // wipe it so one test's /new or /resume never leaks into the next.
+    rmSync(join('/tmp/wecom-test', '.dsh-wecom-state.json'), { force: true })
+  })
+
   function makeStreamingSetup(stream: unknown[], replyText: string) {
     const events: unknown[] = []
     const sessionHandlers = new Map<string, Set<(...args: unknown[]) => void>>()
@@ -163,7 +171,7 @@ describe('WecomChannel streaming', () => {
     const agent = {
       status: 'idle',
       options: { provider: 'p', model: 'm' },
-      session: { events },
+      session: { id: '', events },
       ctx: {
         on: (event: string, handler: (...args: unknown[]) => void) => {
           const set = sessionHandlers.get(event) ?? new Set<(...args: unknown[]) => void>()
@@ -171,11 +179,25 @@ describe('WecomChannel streaming', () => {
           sessionHandlers.set(event, set)
           return () => set.delete(handler)
         },
+        provide: vi.fn(),
+        systemPrompt: { section: vi.fn() },
       },
       cancel: () => undefined,
       followup: () => {
         agent.status = 'running'
         for (const event of stream) {
+          if ((event as { type?: string }).type === 'assistant/chunk') {
+            // Production shape on the current harness: model deltas are
+            // transient `agent/assistant-stream` frames, not session events.
+            fireAgent('agent/assistant-stream', {
+              agent,
+              frame: {
+                type: 'chunk',
+                chunk: (event as { data?: { chunk?: unknown } }).data?.chunk,
+              },
+            })
+            continue
+          }
           events.push(event)
           fireAgent('session/event', agent.session, event)
         }
@@ -209,12 +231,14 @@ describe('WecomChannel streaming', () => {
       agents: {
         create: vi.fn(
           async (options: { sessionId: string; setup?: (agentCtx: unknown) => Promise<void> }) => {
-            if (options.setup) await options.setup({ systemPrompt: { section() {} } })
+            agent.session.id = options.sessionId
+            // Setup runs on the agent's own scoped context (real harness).
+            if (options.setup) await options.setup(agent.ctx)
             return { agent, dispose: vi.fn(async () => undefined) }
           },
         ),
         resume: vi.fn(),
-        get: vi.fn(() => agent),
+        get: vi.fn((id: string) => (id === agent.session.id ? agent : undefined)),
       },
       get: vi.fn(() => undefined),
     }
@@ -367,8 +391,119 @@ describe('WecomChannel streaming', () => {
 
     const calls = (client as unknown as { replyStream: ReturnType<typeof vi.fn> }).replyStream.mock
       .calls
-    expect(calls.at(-1)?.[2]).toBe('Started a new conversation.')
+    expect(calls.at(-1)?.[2]).toBe(
+      'Started a new conversation (#1). History is kept — /session lists it.',
+    )
     expect(calls.at(-1)?.[3]).toBe(true)
+  })
+
+  it('recognizes slash commands after stripping the @mention in group chats', async () => {
+    const { client, fire } = makeClient()
+    const ctx = makeStreamingSetup([], 'unused')
+    const channel = new WecomChannel(
+      ctx as never,
+      testConfig({ streamFlushMs: 5_000 }),
+      () => client,
+    )
+    await channel.start()
+    const reply = () =>
+      (client as unknown as { replyStream: ReturnType<typeof vi.fn> }).replyStream.mock.calls.at(-1)
+
+    // "@Bot /new" arrives with the mention as the first token; without the
+    // strip, the command head would be "@Bot" and never match. After the strip
+    // it must dispatch to /new (and never reach the model).
+    await fire('message', {
+      headers: { req_id: 'r-gnew' },
+      body: {
+        msgid: 'gnew',
+        aibotid: 'bot',
+        chattype: 'group',
+        chatid: 'chatroom1',
+        from: { userid: 'u1' },
+        msgtype: 'text',
+        text: { content: '@性能助手 /new' },
+      },
+    })
+    expect(String(reply()?.[2])).toContain('Started a new conversation (#1)')
+    expect(ctx.agents.create).not.toHaveBeenCalled()
+  })
+
+  it('routes /session, /current, and /resume through the command path', async () => {
+    const { client, fire } = makeClient()
+    const ctx = makeStreamingSetup([], 'unused')
+    const channel = new WecomChannel(
+      ctx as never,
+      testConfig({ streamFlushMs: 5_000 }),
+      () => client,
+    )
+    await channel.start()
+    const reply = () =>
+      (client as unknown as { replyStream: ReturnType<typeof vi.fn> }).replyStream.mock.calls.at(-1)
+
+    // No history yet: /session and /current give the "start by messaging" hint.
+    await sendText(fire, '/session', 'm-session')
+    expect(String(reply()?.[2])).toContain('还没有历史 session')
+    await sendText(fire, '/current', 'm-current')
+    expect(String(reply()?.[2])).toContain('当前还没有 session')
+
+    // /resume validates its argument and the target's existence.
+    await sendText(fire, '/resume', 'm-resume-empty')
+    expect(String(reply()?.[2])).toContain('/resume <编号>')
+    await sendText(fire, '/resume 9', 'm-resume-missing')
+    expect(String(reply()?.[2])).toContain('没有编号为 9')
+    // The command matched on its first token — it never reached the model.
+    expect(ctx.agents.create).not.toHaveBeenCalled()
+  })
+
+  it("lists a chat's sessions and resumes one by epoch number", async () => {
+    const base = 'dsh-wecom-single-8abea0ded638fab07fcd109faa287789'
+    const { client, fire } = makeClient()
+    const ctx = makeStreamingSetup([], 'unused')
+    ctx.sessionPersistence.list = vi.fn(async () => [
+      { id: base, createdAt: 1_700_000_000_000 },
+      { id: `${base}~g1`, createdAt: 1_700_100_000_000 },
+      { id: `${base}~g2`, createdAt: 1_700_200_000_000 },
+    ]) as never
+    ;(ctx.sessionPersistence as Record<string, unknown>).inspect = vi.fn(async (id: string) => ({
+      meta: { id },
+      events: [
+        { type: 'turn/end', seq: 1, data: { reason: { kind: 'completed' } } },
+        {
+          type: 'session/title',
+          seq: 2,
+          data: { title: id.endsWith('g1') ? '旧话题' : '更早话题' },
+        },
+      ],
+    })) as never
+    const channel = new WecomChannel(
+      ctx as never,
+      testConfig({ streamFlushMs: 5_000 }),
+      () => client,
+    )
+    await channel.start()
+    // The chat sits on epoch 2 (two /new's happened earlier).
+    ;(channel as unknown as { pool: { epochs: Map<string, number> } }).pool.epochs.set(base, 2)
+    const reply = () =>
+      (client as unknown as { replyStream: ReturnType<typeof vi.fn> }).replyStream.mock.calls.at(-1)
+
+    await sendText(fire, '/session', 'm-list')
+    const list = String(reply()?.[2])
+    expect(list).toContain('共 3 个 session')
+    expect(list).toContain('#2')
+    expect(list).toContain('#1')
+    expect(list).toContain('#0')
+    expect(list).toContain('更早话题')
+    expect(list).toContain('旧话题')
+    // The routing session (epoch 2) is marked with the leading `*`.
+    expect(list).toMatch(/^\* #2/m)
+
+    await sendText(fire, '/resume 1', 'm-resume')
+    expect(String(reply()?.[2])).toContain('已切换到 session #1')
+    expect(String(reply()?.[2])).toContain('旧话题')
+
+    await sendText(fire, '/current', 'm-cur')
+    expect(String(reply()?.[2])).toContain('#1')
+    expect(String(reply()?.[2])).toContain('旧话题')
   })
 
   it('sends the approval ack through the proactive channel, never the passive stream', async () => {
@@ -430,6 +565,80 @@ describe('WecomChannel streaming', () => {
     expect(String(sendCalls[0]?.[1]?.markdown?.content)).toContain('Final answer')
   })
 
+  it('still ships rendered cards when the final stream reply fails', async () => {
+    // The production failure this guards: a report turn outlives the WeCom
+    // ~6-minute passive-stream window (errcode 846608) and renders its card
+    // near the end. The text survives via the proactive fallback, but the card
+    // used to be skipped because it shared the stream's try/catch — the user
+    // got the answer and no image.
+    const { client, fire } = makeClient()
+    let callCount = 0
+    ;(
+      client as unknown as { replyStream: ReturnType<typeof vi.fn> }
+    ).replyStream.mockImplementation(async () => {
+      callCount += 1
+      if (callCount >= 2) throw new Error('Reply ack error: errcode 846608')
+      return undefined
+    })
+    const stream = [
+      {
+        type: 'tool/call',
+        data: { turn: 1, step: 1, callId: 'c1', name: 'render_card', arguments: '{}' },
+      },
+      {
+        type: 'tool/result',
+        data: {
+          turn: 1,
+          step: 1,
+          message: {
+            source: { kind: 'tool', callId: 'c1' },
+            content: [
+              {
+                type: 'tool-result',
+                content: [
+                  {
+                    type: 'image',
+                    attachment: {
+                      attachmentId: 'img-1',
+                      mediaType: 'image/png',
+                      bytes: 3,
+                      width: 1080,
+                      height: 800,
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      },
+    ]
+    const channel = new WecomChannel(
+      makeStreamingSetup(stream, 'Final answer') as never,
+      testConfig({ streamFlushMs: 5_000, sendAttempts: 1 }),
+      () => client,
+    )
+    await channel.start()
+    await sendText(fire, 'hi', 'm1')
+
+    const media = client as unknown as {
+      uploadMedia: ReturnType<typeof vi.fn>
+      sendMediaMessage: ReturnType<typeof vi.fn>
+      sendMessage: ReturnType<typeof vi.fn>
+    }
+    // Text reached the chat through the proactive fallback...
+    const sendCalls = media.sendMessage.mock.calls
+    expect(sendCalls).toHaveLength(1)
+    expect(String(sendCalls[0]?.[1]?.markdown?.content)).toContain('Final answer')
+    // ...AND the card still shipped, on its own path.
+    expect(media.uploadMedia).toHaveBeenCalled()
+    expect(media.sendMediaMessage).toHaveBeenCalled()
+    const cardCalls = media.sendMediaMessage.mock.calls
+    expect(cardCalls[0]?.[0]).toBe('u1')
+    expect(cardCalls[0]?.[1]).toBe('image')
+    expect(cardCalls[0]?.[2]).toBe('media-1')
+  })
+
   it('sends rendered cards as uploaded media via the proactive channel, not stream msg_item', async () => {
     // A turn that produces an image block (card) must ship it through
     // uploadMedia → sendMediaMessage(media_id) on the PROACTIVE channel
@@ -455,7 +664,18 @@ describe('WecomChannel streaming', () => {
             content: [
               {
                 type: 'tool-result',
-                content: [{ type: 'image', attachment: { attachmentId: 'img-1', mediaType: 'image/png', bytes: 3, width: 1080, height: 800 } }],
+                content: [
+                  {
+                    type: 'image',
+                    attachment: {
+                      attachmentId: 'img-1',
+                      mediaType: 'image/png',
+                      bytes: 3,
+                      width: 1080,
+                      height: 800,
+                    },
+                  },
+                ],
               },
             ],
           },
@@ -470,7 +690,10 @@ describe('WecomChannel streaming', () => {
     await channel.start()
     await sendText(fire, 'hi', 'm1')
 
-    const media = client as unknown as { uploadMedia: ReturnType<typeof vi.fn>; sendMediaMessage: ReturnType<typeof vi.fn> }
+    const media = client as unknown as {
+      uploadMedia: ReturnType<typeof vi.fn>
+      sendMediaMessage: ReturnType<typeof vi.fn>
+    }
     // One upload (to get media_id) and one sendMediaMessage per rendered card.
     expect(media.uploadMedia).toHaveBeenCalled()
     expect(media.sendMediaMessage).toHaveBeenCalled()

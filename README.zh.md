@@ -17,7 +17,7 @@
 - 🧹 **消息治理**——msgid 去重、按会话排队、全局并发上限、单轮超时主动 cancel 不留僵尸轮次
 - 📡 **自愈**——长连接断开（被踢/鉴权失败/被新客户端顶掉）后按 `restartIntervalMs`（默认 10s）自动重连
 - 🩺 **可观测**——主机级 `wecomChannelStatus` 服务、`GET /api/wecom/status` JSON 路由、侧栏入口 + 连接状态圆点 + 浮动状态面板
-- 💬 **机器人命令**——`/ping /help /status /stop /compact /new`
+- 💬 **机器人命令**——`/ping /help /status /stop /compact /new /session /current /resume`
 
 ## 🚀 快速开始
 
@@ -112,6 +112,9 @@ dsh plugin --profile web add ./dsh-wecom-0.1.5.tgz
 | `/stop` | 取消当前生成 |
 | `/compact` | 把较早历史压缩成摘要省上下文 |
 | `/new` | 开启新会话（历史保留，下一条消息开新 session） |
+| `/session` | 列出本聊天的历史 session（新→旧：编号、开始时间、轮数、标题，当前标 `*`）。别名 `/sessions` |
+| `/current` | 显示新消息当前路由到的 session |
+| `/resume <n>` | 按编号切回历史 session（见 `/session`；跨重启保留） |
 
 ## 🏗️ 工作原理
 

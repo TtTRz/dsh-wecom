@@ -24,6 +24,7 @@ export async function toContentBlocks(
   message: BaseMessage,
   media: MediaPort,
   includeImages: boolean,
+  resolveSender?: (userid: string) => string | undefined,
 ): Promise<ContentBlock[]> {
   const parts: string[] = []
   const images: ImageContent[] = []
@@ -31,14 +32,16 @@ export async function toContentBlocks(
   readQuote(message, parts, images)
   const hadText = parts.length > 0
 
-  // Label the message with its sender — group chats only: "[userid]：text"
+  // Label the message with its sender — group chats only: "[sender]：text"
   // on one line. Single chats have exactly one sender, so the label is
   // noise there. The full-width colon is deliberate: an ASCII colon after a
   // bracket would parse as a Markdown link reference and vanish from
-  // rendered bubbles.
+  // rendered bubbles. `resolveSender` (a synchronous cache-only RTX lookup,
+  // when mounted) swaps the raw userid for the resolved RTX; on a miss the
+  // label keeps the userid.
   const group = message.chattype === 'group'
   if (group) {
-    const sender = message.from.userid
+    const sender = resolveSender?.(message.from.userid) ?? message.from.userid
     if (hadText) {
       parts[0] = `[${sender}]：${parts[0]}`
     } else {
