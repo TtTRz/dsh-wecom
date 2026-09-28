@@ -420,11 +420,11 @@ describe('AgentPool', () => {
 
   it('uses the configured provider/model for new conversations', async () => {
     const { ctx, live, created } = makeHarness()
-    const manager = new AgentPool(ctx as never, testConfig({ provider: 'example-provider', model: 'glm-5.3' }))
+    const manager = new AgentPool(ctx as never, testConfig({ provider: 'example-provider', model: 'example-model' }))
     await manager.start()
     await manager.handle(singleMessage('hello'), noopDownload)
     const agent = live.get(created[0]?.sessionId ?? '') as FakeAgent | undefined
-    expect(agent?.options).toEqual({ provider: 'example-provider', model: 'glm-5.3' })
+    expect(agent?.options).toEqual({ provider: 'example-provider', model: 'example-model' })
   })
 
   it('rejects a half-configured model route', () => {
