@@ -438,31 +438,6 @@ describe('AgentPool', () => {
     ).toThrow('provider and model must be configured together')
   })
 
-  it('selectionFor prefers the configured model over the logged header', () => {
-    const manager = new AgentPool(
-      makeHarness().ctx as never,
-      testConfig({ provider: 'v', model: 'm' }),
-    )
-    const agent = makeAgent()
-    agent.session.requestHeader = vi.fn(() => ({ config: { provider: 'p2', model: 'm2' } }))
-    expect(manager.selectionFor(agent as never).current).toEqual({ provider: 'v', model: 'm' })
-  })
-
-  it('selectionFor inherits the logged header model and falls back to none', () => {
-    const manager = new AgentPool(makeHarness().ctx as never, testConfig())
-    const agent = makeAgent()
-    agent.session.requestHeader = vi.fn(() => ({
-      config: { provider: 'p2', model: 'm2', reasoningEffort: 'high' },
-    }))
-    expect(manager.selectionFor(agent as never).current).toEqual({
-      provider: 'p2',
-      model: 'm2',
-      reasoningEffort: 'high',
-    })
-    const bare = makeAgent()
-    expect(manager.selectionFor(bare as never).current).toBeUndefined()
-  })
-
   describe.each(['legacy headers', 'rc.2 snapshots'])(
     'session history commands (%s)',
     (contract) => {

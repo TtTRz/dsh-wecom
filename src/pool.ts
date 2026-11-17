@@ -8,7 +8,6 @@ import {
   type AgentSetup,
   installModelSelection,
   type ModelSelection,
-  type ModelSelectionRef,
 } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-presets'
@@ -1886,38 +1885,26 @@ export class AgentPool {
   }
 
   /**
-   * Install the pool's model policy on one pool-owned agent: an explicit
-   * `provider`/`model` config wins; otherwise a resumed conversation keeps
-   * the model logged in its session header (so a web-UI model switch
-   * survives restarts); otherwise the harness default carried by
-   * {@link modelOptions} applies. Mirrors the harness's own per-agent
-   * selection, so a later web-UI switch still overrides it.
+   * Install the harness's own per-agent model-selection notices on one
+   * pool-owned agent (the `agent/pre-step` model-switch notice).
+   *
+   * Harness 0.2.x's `installModelSelection` accepts only the agent context — it
+   * no longer takes a `ModelSelectionRef` — so the pool pins the actual
+   * provider/model/effort through {@link modelOptions} and
+   * {@link pinReasoningEffort} instead of a custom ref. (The 0.1.x ref API left
+   * an ignored second argument behind; keeping it only looked configured.)
    */
   private inheritModelSelection(agent: Agent): void {
-    installModelSelection(agent.ctx, this.selectionFor(agent))
-  }
-
-  /** Mutable model-selection policy for one pool-owned agent. */
-  selectionFor(agent: Agent): ModelSelectionRef {
-    const configured = this.configuredModel
-    return {
-      get current(): ModelSelection | undefined {
-        if (configured !== undefined) return configured
-        const header = agent.session.requestHeader()
-        const config = header?.config
-        if (config?.provider !== undefined && config?.model !== undefined) {
-          return {
-            provider: config.provider,
-            model: config.model,
-            ...(config.reasoningEffort === undefined
-              ? {}
-              : { reasoningEffort: config.reasoningEffort }),
-          }
-        }
+    // Harness 0.2.x's `installModelSelection` only accepts the agent context;
+    // its 0.1.x type still declares a second `ModelSelectionRef` argument that
+    // 0.2.x never reads. Pass an empty ref (never consulted) and let
+    // {@link modelOptions} + {@link pinReasoningEffort} own the selection.
+    installModelSelection(agent.ctx, {
+      get current(): undefined {
         return undefined
       },
       assembled: undefined,
-    }
+    })
   }
 
   /**
