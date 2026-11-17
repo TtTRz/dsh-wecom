@@ -1640,6 +1640,13 @@ export class AgentPool {
     const identity = await this.enrichIdentity(baseIdentity)
     this.turnIdentities.set(sessionId, identity)
     try {
+      // Pin the reasoning effort on the session before the first step. The
+      // harness projects an adapter-defaulted effort away from the request
+      // header, so later turns fall back to "adapter default" while the
+      // `agent/request` hook still proposes the adapter default — which makes
+      // every turn after the first fail. An explicit `model/selection` event
+      // keeps all turns on one effort.
+      this.pinReasoningEffort(agent)
       const includeImages = containsImageMedia(message) ? await this.canViewImages(agent) : false
       const content = await toContentBlocks(
         message,
@@ -2079,6 +2086,26 @@ export class AgentPool {
     if (provider === undefined || model === undefined) return false
     const info = await this.ctx.llm.resolveModelInfo(provider, model)
     return info.inputModalities?.includes('image') ?? false
+  }
+
+  /**
+   * Record the explicit reasoning effort on the session before a turn's first
+   * step, so later turns keep it instead of falling back to "adapter default".
+   */
+  private pinReasoningEffort(agent: Agent): void {
+    const selection = this.ctx.agentDefaultModel.currentSelection()
+    if (selection.reasoningEffort === undefined) return
+    const model = (agent as { model?: { select?: (s: unknown) => void } }).model
+    if (model?.select === undefined) return
+    try {
+      model.select({
+        provider: selection.provider,
+        model: selection.model,
+        reasoningEffort: selection.reasoningEffort,
+      })
+    } catch {
+      /* older harness without model.select */
+    }
   }
 
   private modelOptions(): { provider: string; model: string; reasoningEffort?: string } {
