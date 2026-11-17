@@ -137,6 +137,7 @@ dsh plugin --profile web add ./dsh-wecom-0.5.3.tgz
 | `streamFlushMs` | `250` | 流式文本冲刷节奏（ms） |
 | `showReasoning` | `true` | 推理包进企微原生 `<think>` 卡片 |
 | `showToolCalls` | `true` | 在 `<think>` 卡片内渲染紧凑的工具调用列表 |
+| `feedbackMode` | `off` | `off` 忽略企微 👍/👎 反馈；`log` 给每条回复打反馈 id，并把收到的反馈打到通道日志 |
 | `maxConcurrent` | `4` | 全局并发轮次上限 |
 | `turnTimeoutMs` | `300000` | 无进展超时；会话事件和流式帧会重置期限 |
 | `approvalMode` | `chat` | `chat` 在聊天中批准/拒绝提权请求；`notify` 只通知、由网页决定；`off` 不发送通知 |

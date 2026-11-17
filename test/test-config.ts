@@ -25,6 +25,7 @@ export function testConfig(overrides: Partial<Config> = {}): ResolvedConfig {
     streamFlushMs: 50,
     showReasoning: true,
     showToolCalls: true,
+    feedbackMode: 'off',
     connectTimeoutMs: 1_000,
     turnTimeoutMs: 1_000,
     sendTimeoutMs: 1_000,

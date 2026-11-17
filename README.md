@@ -145,6 +145,7 @@ services without designating one bot as the primary UI host.
 | `streamFlushMs` | `250` | Cadence (ms) for flushing accumulated streamed text |
 | `showReasoning` | `true` | Wrap model reasoning in WeCom's native `<think>` card |
 | `showToolCalls` | `true` | Render a compact tool-call activity list inside the `<think>` card |
+| `feedbackMode` | `off` | `off` ignores WeCom 👍/👎 events; `log` marks each reply with a feedback id and logs received feedback through the channel logger |
 | `maxConcurrent` | `4` | Global cap on concurrent turns |
 | `turnTimeoutMs` | `300000` | No-progress timeout; session events and stream frames reset the deadline |
 | `approvalMode` | `chat` | In-chat sandbox-escalation approvals: `chat` answers from the chat (reply 批准/拒绝), `notify` only pushes the ask, `off` is fully silent (web UI decides) |

@@ -2,6 +2,7 @@ import { rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { type BotClient, buildStreamContent, WecomChannel } from '../src/channel.js'
+import type { Config } from '../src/config.js'
 import { testConfig } from './test-config.js'
 
 function makeClient() {
@@ -245,11 +246,15 @@ describe('WecomChannel streaming', () => {
     return ctx
   }
 
-  async function runStreamingMessage(stream: unknown[], replyText: string): Promise<unknown[][]> {
+  async function runStreamingMessage(
+    stream: unknown[],
+    replyText: string,
+    overrides: Partial<Config> = {},
+  ): Promise<unknown[][]> {
     const { client, fire } = makeClient()
     const channel = new WecomChannel(
       makeStreamingSetup(stream, replyText) as never,
-      testConfig({ streamFlushMs: 5_000 }),
+      testConfig({ streamFlushMs: 5_000, ...overrides }),
       () => client,
     )
     await channel.start()
@@ -706,6 +711,17 @@ describe('WecomChannel streaming', () => {
     // Target is the single-chat userid from the inbound message.
     expect(sendCalls[0]?.[0]).toBe('u1')
   })
+
+  it('marks the first stream reply with a feedback id when feedbackMode=log', async () => {
+    const calls = await runStreamingMessage([], 'hi', { feedbackMode: 'log' })
+    // First frame is the "Working…" ack carrying the feedback id WeCom echoes back.
+    expect(calls[0]?.[5]).toEqual({ id: expect.any(String) })
+  })
+
+  it('leaves replies unmarked when feedbackMode=off', async () => {
+    const calls = await runStreamingMessage([], 'hi')
+    expect(calls[0]?.[5]).toBeUndefined()
+  })
 })
 
 describe('buildStreamContent', () => {
@@ -729,5 +745,70 @@ describe('buildStreamContent', () => {
     expect(buildStreamContent('a<think>b</think>c<thinking>d</thinking>', 'Hi', true)).toBe(
       '<think>abcd</think>\nHi',
     )
+  })
+})
+
+describe('WecomChannel feedback', () => {
+  function makeFeedbackCtx(info: ReturnType<typeof vi.fn>) {
+    return {
+      ...makeCtx(),
+      logger: () => ({ debug() {}, info, warn() {}, error() {} }),
+    }
+  }
+
+  function feedbackFrame(feedback: unknown) {
+    return {
+      headers: { req_id: 'e1' },
+      body: {
+        msgid: 'e1',
+        aibotid: 'bot',
+        chattype: 'single',
+        from: { userid: 'u1' },
+        msgtype: 'event',
+        event: { eventtype: 'feedback_event', feedback_event: feedback },
+      },
+    }
+  }
+
+  it('logs one structured line per feedback event when feedbackMode=log', async () => {
+    const info = vi.fn()
+    const { client, fire } = makeClient()
+    const channel = new WecomChannel(
+      makeFeedbackCtx(info) as never,
+      testConfig({ feedbackMode: 'log' }),
+      () => client,
+    )
+    await channel.start()
+    await fire(
+      'event.feedback_event',
+      feedbackFrame({
+        id: 'dsh-1',
+        type: 2,
+        content: 'not helpful',
+        inaccurate_reason_list: [2],
+      }),
+    )
+    expect(info).toHaveBeenCalledWith(
+      'WeCom feedback: %s',
+      expect.stringContaining('"feedbackId":"dsh-1"'),
+    )
+    expect(info).toHaveBeenCalledWith('WeCom feedback: %s', expect.stringContaining('"type":2'))
+    expect(info).toHaveBeenCalledWith(
+      'WeCom feedback: %s',
+      expect.stringContaining('"reasons":[2]'),
+    )
+  })
+
+  it('ignores feedback events when feedbackMode=off', async () => {
+    const info = vi.fn()
+    const { client, fire } = makeClient()
+    const channel = new WecomChannel(
+      makeFeedbackCtx(info) as never,
+      testConfig({ feedbackMode: 'off' }),
+      () => client,
+    )
+    await channel.start()
+    await fire('event.feedback_event', feedbackFrame({ id: 'dsh-1', type: 1 }))
+    expect(info.mock.calls.some((call) => call[0] === 'WeCom feedback: %s')).toBe(false)
   })
 })

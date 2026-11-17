@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Collect WeCom user-feedback events (👍/👎). `feedbackMode: 'log'` marks the
+  first stream frame of each reply with a feedback id and logs every received
+  `event.feedback_event` (feedback id, verdict `1/2/3`, optional text and 👎
+  reason codes) through the channel logger. Defaults to `off`.
+
 ## [0.5.3] - 2026-09-28
 
 ### Fixed
