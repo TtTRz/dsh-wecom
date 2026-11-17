@@ -1,5 +1,6 @@
 import { appendFileSync } from 'node:fs'
-import { isAbsolute } from 'node:path'
+import { readFile } from 'node:fs/promises'
+import { basename, isAbsolute } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import {
@@ -492,6 +493,14 @@ export class WecomChannel {
         this.log.error('WeCom card image send failed: %s', String(cardError))
         logTurnFailure(message, cardError)
       }
+      // Files declared through `present` ride the same proactive channel as
+      // card images: the passive stream reply cannot carry attachments.
+      try {
+        await this.sendFilesAsMedia(message, reply)
+      } catch (fileError) {
+        this.log.error('WeCom file send failed: %s', String(fileError))
+        logTurnFailure(message, fileError)
+      }
     } catch (error) {
       this.log.error('WeCom message %s failed: %s', message.msgid, String(error))
       logTurnFailure(message, error)
@@ -707,6 +716,61 @@ export class WecomChannel {
         )
       } catch (error) {
         this.log.error('WeCom card image send failed: %s', String(error))
+      }
+    }
+  }
+
+  /**
+   * Ship files declared through the `present` tool through the PROACTIVE
+   * channel (aibot_send_msg + media_id). PNG/JPEG files ≤2MB ride
+   * `msgtype=image` so WeCom renders them inline; everything else (and any
+   * image that fails to send) goes as a `msgtype=file` card. The passive stream
+   * reply cannot carry attachments, so each file is uploaded for a temporary
+   * media_id and then pushed to the chat. Failures are logged and skipped while
+   * the text reply still goes out.
+   */
+  private async sendFilesAsMedia(message: BaseMessage, reply: Reply): Promise<void> {
+    if (reply.files === undefined || reply.files.length === 0) return
+    const peer = replyTarget(message)
+    for (const file of reply.files.slice(0, 10)) {
+      try {
+        const data = Buffer.from(await readFile(file.path))
+        const filename = basename(file.path)
+        // PNG/JPEG (≤2MB) go through the image message so WeCom renders them
+        // inline; everything else (and anything oversized) stays a file card.
+        const isImage = /\.(png|jpe?g)$/i.test(filename) && data.length <= 2 * 1024 * 1024
+        const sendKind: WeComMediaType = isImage ? 'image' : 'file'
+        const uploaded = await this.liveClient().uploadMedia(data, {
+          type: sendKind,
+          filename,
+        })
+        if (uploaded.media_id === undefined || uploaded.media_id.length === 0) continue
+        await this.retry(async () =>
+          timeout(
+            this.liveClient().sendMediaMessage(peer, sendKind, uploaded.media_id!),
+            this.config.sendTimeoutMs,
+            sendKind === 'image' ? 'WeCom image push send' : 'WeCom file push send',
+          ),
+        )
+      } catch (error) {
+        this.log.error('WeCom file send failed: %s', String(error))
+        // An image upload can fail on size/format limits; fall back to a file
+        // card so the user still receives the asset.
+        try {
+          const fallbackName = basename(file.path)
+          if (!/\.(png|jpe?g)$/i.test(fallbackName)) continue
+          const fallbackData = Buffer.from(await readFile(file.path))
+          const fallbackUploaded = await this.liveClient().uploadMedia(fallbackData, {
+            type: 'file',
+            filename: fallbackName,
+          })
+          if (fallbackUploaded.media_id === undefined || fallbackUploaded.media_id.length === 0) {
+            continue
+          }
+          await this.liveClient().sendMediaMessage(peer, 'file', fallbackUploaded.media_id)
+        } catch (fallbackError) {
+          this.log.error('WeCom file fallback failed: %s', String(fallbackError))
+        }
       }
     }
   }

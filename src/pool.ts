@@ -8,7 +8,6 @@ import {
   type AgentSetup,
   installModelSelection,
   type ModelSelection,
-  type ModelSelectionRef,
 } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-presets'
@@ -55,6 +54,17 @@ export interface Reply {
    * the `render_card` tool), oldest first. Channels attach them to the reply.
    */
   images?: ImageAttachmentRef[]
+  /**
+   * Files declared through the `present` tool during the turn, oldest first.
+   * Channels attach them to the reply as file messages.
+   */
+  files?: PresentedFileRef[]
+}
+
+/** One file declared by the `present` tool (absolute or session-relative path). */
+export interface PresentedFileRef {
+  path: string
+  description?: string
 }
 
 /**
@@ -1553,6 +1563,7 @@ export class AgentPool {
     const pendingCalls = new Map<string, { name: string; arguments: string }>()
     const toolCalls: ToolCallSummary[] = []
     const images: ImageAttachmentRef[] = []
+    const files: PresentedFileRef[] = []
     // Forward one model delta to the streaming sink and, for reasoning, to the
     // final process summary. Both delta sources below funnel through here so
     // the two harness generations behave identically.
@@ -1617,6 +1628,11 @@ export class AgentPool {
             }
           }
         }
+      } else if ((event as { type: string }).type === 'deliverables/presented') {
+        // Files declared through the `present` tool are recorded as a session
+        // event; collect their paths so the channel can attach them.
+        const data = (event as { data: { files: PresentedFileRef[] } }).data
+        files.push(...data.files)
       }
     })
     // Record the turn's sender identity BEFORE the first prompt assembly:
@@ -1640,6 +1656,13 @@ export class AgentPool {
     const identity = await this.enrichIdentity(baseIdentity)
     this.turnIdentities.set(sessionId, identity)
     try {
+      // Pin the reasoning effort on the session before the first step. The
+      // harness projects an adapter-defaulted effort away from the request
+      // header, so later turns fall back to "adapter default" while the
+      // `agent/request` hook still proposes the adapter default — which makes
+      // every turn after the first fail. An explicit `model/selection` event
+      // keeps all turns on one effort.
+      this.pinReasoningEffort(agent)
       const includeImages = containsImageMedia(message) ? await this.canViewImages(agent) : false
       const content = await toContentBlocks(
         message,
@@ -1660,6 +1683,7 @@ export class AgentPool {
     if (reasoning.length > 0) reply.reasoning = reasoning.join('')
     if (toolCalls.length > 0) reply.toolCalls = toolCalls
     if (images.length > 0) reply.images = images
+    if (files.length > 0) reply.files = files
     return reply
   }
 
@@ -1861,38 +1885,26 @@ export class AgentPool {
   }
 
   /**
-   * Install the pool's model policy on one pool-owned agent: an explicit
-   * `provider`/`model` config wins; otherwise a resumed conversation keeps
-   * the model logged in its session header (so a web-UI model switch
-   * survives restarts); otherwise the harness default carried by
-   * {@link modelOptions} applies. Mirrors the harness's own per-agent
-   * selection, so a later web-UI switch still overrides it.
+   * Install the harness's own per-agent model-selection notices on one
+   * pool-owned agent (the `agent/pre-step` model-switch notice).
+   *
+   * Harness 0.2.x's `installModelSelection` accepts only the agent context — it
+   * no longer takes a `ModelSelectionRef` — so the pool pins the actual
+   * provider/model/effort through {@link modelOptions} and
+   * {@link pinReasoningEffort} instead of a custom ref. (The 0.1.x ref API left
+   * an ignored second argument behind; keeping it only looked configured.)
    */
   private inheritModelSelection(agent: Agent): void {
-    installModelSelection(agent.ctx, this.selectionFor(agent))
-  }
-
-  /** Mutable model-selection policy for one pool-owned agent. */
-  selectionFor(agent: Agent): ModelSelectionRef {
-    const configured = this.configuredModel
-    return {
-      get current(): ModelSelection | undefined {
-        if (configured !== undefined) return configured
-        const header = agent.session.requestHeader()
-        const config = header?.config
-        if (config?.provider !== undefined && config?.model !== undefined) {
-          return {
-            provider: config.provider,
-            model: config.model,
-            ...(config.reasoningEffort === undefined
-              ? {}
-              : { reasoningEffort: config.reasoningEffort }),
-          }
-        }
+    // Harness 0.2.x's `installModelSelection` only accepts the agent context;
+    // its 0.1.x type still declares a second `ModelSelectionRef` argument that
+    // 0.2.x never reads. Pass an empty ref (never consulted) and let
+    // {@link modelOptions} + {@link pinReasoningEffort} own the selection.
+    installModelSelection(agent.ctx, {
+      get current(): undefined {
         return undefined
       },
       assembled: undefined,
-    }
+    })
   }
 
   /**
@@ -2033,11 +2045,12 @@ export class AgentPool {
           // Outside a WeCom-driven turn (web-UI follow-up on this session, or a
           // session driven by another channel) the section renders empty.
           if (current === undefined) return ''
-          // When an enricher resolved the sender's RTX, surface it so the model
+          // When an enricher resolved the sender's name, surface it so the model
           // knows who is actually talking (and can attribute work / billing).
+          // The enricher decides the label — no deployment-specific prefix here.
           const who =
             current.resolved?.rtx !== undefined
-              ? `当前企业微信用户 ${current.userid}（工蜂 ${current.resolved.rtx}）`
+              ? `当前企业微信用户 ${current.userid}（${current.resolved.rtx}）`
               : `当前企业微信用户 ${current.userid}`
           const scope = current.chattype === 'group' ? '群聊' : '单聊'
           return `${who}，来自企微${scope}。`
@@ -2081,12 +2094,38 @@ export class AgentPool {
     return info.inputModalities?.includes('image') ?? false
   }
 
-  private modelOptions(): { provider: string; model: string } {
+  /**
+   * Record the explicit reasoning effort on the session before a turn's first
+   * step, so later turns keep it instead of falling back to "adapter default".
+   */
+  private pinReasoningEffort(agent: Agent): void {
+    const selection = this.ctx.agentDefaultModel.currentSelection()
+    if (selection.reasoningEffort === undefined) return
+    const model = (agent as { model?: { select?: (s: unknown) => void } }).model
+    if (model?.select === undefined) return
+    try {
+      model.select({
+        provider: selection.provider,
+        model: selection.model,
+        reasoningEffort: selection.reasoningEffort,
+      })
+    } catch {
+      /* older harness without model.select */
+    }
+  }
+
+  private modelOptions(): { provider: string; model: string; reasoningEffort?: string } {
     if (this.configuredModel !== undefined) {
       return { provider: this.configuredModel.provider, model: this.configuredModel.model }
     }
     const selection = this.ctx.agentDefaultModel.currentSelection()
-    return { provider: selection.provider, model: selection.model }
+    return {
+      provider: selection.provider,
+      model: selection.model,
+      ...(selection.reasoningEffort === undefined
+        ? {}
+        : { reasoningEffort: selection.reasoningEffort }),
+    }
   }
 
   private extractText(events: readonly SessionEvent[]): Reply {
