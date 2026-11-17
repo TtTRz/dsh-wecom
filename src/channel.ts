@@ -6,6 +6,7 @@ import {
   type BaseMessage,
   type EnterChatEvent,
   type EventMessageWith,
+  type FeedbackEventData,
   generateReqId,
   type Logger,
   type ReplyMsgItem,
@@ -21,6 +22,21 @@ import type { ResolvedConfig } from './config.js'
 import { clipUtf8, Dedupe, replyTarget, timeout } from './helpers.js'
 import { AgentPool, type Reply } from './pool.js'
 
+/** The user-feedback payload WeCom sends, which the SDK event type does not declare. */
+export interface WecomFeedbackEvent {
+  /** Feedback id echoed from the reply's `stream.feedback.id`. */
+  readonly id: string
+  /** `1` = 👍, `2` = 👎, `3` = cancelled. */
+  readonly type: 1 | 2 | 3
+  /** Optional free text the user attached to the rating. */
+  readonly content?: string
+  /** Optional 👎 reason codes (1-4). */
+  readonly inaccurate_reason_list?: readonly number[]
+}
+
+/** `event.feedback_event` content: the SDK's `eventtype` plus the payload WeCom actually sends. */
+export type FeedbackEventContent = FeedbackEventData & { feedback_event?: WecomFeedbackEvent }
+
 /** The subset of the official SDK this channel calls (kept minimal for test doubles). */
 export interface BotClient {
   readonly isConnected: boolean
@@ -32,6 +48,10 @@ export interface BotClient {
   on(
     event: 'event.enter_chat',
     handler: (frame: WsFrame<EventMessageWith<EnterChatEvent>>) => void | Promise<void>,
+  ): this
+  on(
+    event: 'event.feedback_event',
+    handler: (frame: WsFrame<EventMessageWith<FeedbackEventContent>>) => void | Promise<void>,
   ): this
   on(event: 'event.disconnected_event', handler: () => void): this
   connect(): this
@@ -46,6 +66,7 @@ export interface BotClient {
     content: string,
     finish?: boolean,
     msgItem?: readonly ReplyMsgItem[],
+    feedback?: { id: string },
   ): Promise<unknown>
   replyWelcome(
     frame: WsFrameHeaders,
@@ -316,6 +337,7 @@ export class WecomChannel {
     })
     client.on('message', async (frame) => this.onMessage(frame))
     client.on('event.enter_chat', async (frame) => this.greet(frame))
+    client.on('event.feedback_event', async (frame) => this.onFeedback(frame))
 
     try {
       client.connect()
@@ -405,6 +427,35 @@ export class WecomChannel {
     }
   }
 
+  /**
+   * Handle one WeCom user-feedback event (👍/👎 on an earlier reply). WeCom only
+   * emits these for replies marked with a feedback id, so this is a no-op unless
+   * `feedbackMode` is `log`. The verdict fields live in `event.feedback_event`,
+   * which the SDK's typed event declares only as an `eventtype`.
+   */
+  private async onFeedback(frame: WsFrame<EventMessageWith<FeedbackEventContent>>): Promise<void> {
+    if (this.config.feedbackMode !== 'log') return
+    const body = frame.body
+    if (body === undefined) return
+    const feedback = body.event.feedback_event
+    if (feedback === undefined) return
+    if (typeof feedback.id !== 'string' || feedback.id.length === 0) return
+    if (feedback.type !== 1 && feedback.type !== 2 && feedback.type !== 3) return
+    const payload: Record<string, unknown> = {
+      feedbackId: feedback.id,
+      type: feedback.type,
+      userId: body.from.userid,
+      chatType: body.chattype,
+      chatId: body.chatid,
+      createdAt: body.create_time,
+    }
+    if (typeof feedback.content === 'string') payload.content = feedback.content.slice(0, 2000)
+    if (Array.isArray(feedback.inaccurate_reason_list)) {
+      payload.reasons = feedback.inaccurate_reason_list
+    }
+    this.log.info('WeCom feedback: %s', JSON.stringify(payload))
+  }
+
   private async onMessage(frame: WsFrame<BaseMessage>): Promise<void> {
     const message = frame.body
     if (message === undefined || this.dedupe.seen(message.msgid) || !this.permits(message)) return
@@ -447,7 +498,14 @@ export class WecomChannel {
         )
       : undefined
     try {
-      await this.sendStream(frame, streamId, 'Working…', false)
+      await this.sendStream(
+        frame,
+        streamId,
+        'Working…',
+        false,
+        undefined,
+        this.config.feedbackMode === 'log' ? { id: streamId } : undefined,
+      )
       const reply = await this.pool.handle(
         message,
         (url, aesKey) =>
@@ -665,10 +723,11 @@ export class WecomChannel {
     content: string,
     finish: boolean,
     msgItem?: readonly ReplyMsgItem[],
+    feedback?: { id: string },
   ): Promise<void> {
     await this.retry(async () =>
       timeout(
-        this.liveClient().replyStream(frame, streamId, content, finish, msgItem),
+        this.liveClient().replyStream(frame, streamId, content, finish, msgItem, feedback),
         this.config.sendTimeoutMs,
         'WeCom reply send',
       ),

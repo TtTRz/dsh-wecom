@@ -193,6 +193,13 @@ export interface Config {
   showReasoning: boolean
   /** Append a tool-call activity summary to the final reply. */
   showToolCalls: boolean
+  /**
+   * Collect WeCom user feedback events (👍/👎) for this bot's replies.
+   * `off` (default) neither marks replies for feedback nor listens for events;
+   * `log` marks the first stream frame of each reply with a feedback id and
+   * logs each received event through the channel logger.
+   */
+  feedbackMode: 'off' | 'log'
   connectTimeoutMs: number
   turnTimeoutMs: number
   sendTimeoutMs: number
@@ -265,6 +272,7 @@ export const Config: z<Config> = z.object({
   model: z.string(),
   showReasoning: z.boolean().default(true),
   showToolCalls: z.boolean().default(true),
+  feedbackMode: z.union(['off', 'log']).default('off'),
   connectTimeoutMs: z.number().step(1).min(1).default(30_000),
   turnTimeoutMs: z.number().step(1).min(1).default(300_000),
   sendTimeoutMs: z.number().step(1).min(1).default(30_000),
