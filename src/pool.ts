@@ -2081,12 +2081,18 @@ export class AgentPool {
     return info.inputModalities?.includes('image') ?? false
   }
 
-  private modelOptions(): { provider: string; model: string } {
+  private modelOptions(): { provider: string; model: string; reasoningEffort?: string } {
     if (this.configuredModel !== undefined) {
       return { provider: this.configuredModel.provider, model: this.configuredModel.model }
     }
     const selection = this.ctx.agentDefaultModel.currentSelection()
-    return { provider: selection.provider, model: selection.model }
+    return {
+      provider: selection.provider,
+      model: selection.model,
+      ...(selection.reasoningEffort === undefined
+        ? {}
+        : { reasoningEffort: selection.reasoningEffort }),
+    }
   }
 
   private extractText(events: readonly SessionEvent[]): Reply {
