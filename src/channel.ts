@@ -1,5 +1,6 @@
 import { appendFileSync } from 'node:fs'
-import { isAbsolute } from 'node:path'
+import { readFile } from 'node:fs/promises'
+import { basename, isAbsolute } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import {
@@ -492,6 +493,14 @@ export class WecomChannel {
         this.log.error('WeCom card image send failed: %s', String(cardError))
         logTurnFailure(message, cardError)
       }
+      // Files declared through `present` ride the same proactive channel as
+      // card images: the passive stream reply cannot carry attachments.
+      try {
+        await this.sendFilesAsMedia(message, reply)
+      } catch (fileError) {
+        this.log.error('WeCom file send failed: %s', String(fileError))
+        logTurnFailure(message, fileError)
+      }
     } catch (error) {
       this.log.error('WeCom message %s failed: %s', message.msgid, String(error))
       logTurnFailure(message, error)
@@ -707,6 +716,37 @@ export class WecomChannel {
         )
       } catch (error) {
         this.log.error('WeCom card image send failed: %s', String(error))
+      }
+    }
+  }
+
+  /**
+   * Ship files declared through the `present` tool as dedicated file messages
+   * through the PROACTIVE channel (aibot_send_msg, msgtype=file + media_id).
+   * The passive stream reply cannot carry attachments, so each file is uploaded
+   * for a temporary media_id and then pushed to the chat. Failures are logged
+   * and skipped while the text reply still goes out.
+   */
+  private async sendFilesAsMedia(message: BaseMessage, reply: Reply): Promise<void> {
+    if (reply.files === undefined || reply.files.length === 0) return
+    const peer = replyTarget(message)
+    for (const file of reply.files.slice(0, 10)) {
+      try {
+        const data = await readFile(file.path)
+        const uploaded = await this.liveClient().uploadMedia(Buffer.from(data), {
+          type: 'file',
+          filename: basename(file.path),
+        })
+        if (uploaded.media_id === undefined || uploaded.media_id.length === 0) continue
+        await this.retry(async () =>
+          timeout(
+            this.liveClient().sendMediaMessage(peer, 'file', uploaded.media_id!),
+            this.config.sendTimeoutMs,
+            'WeCom file push send',
+          ),
+        )
+      } catch (error) {
+        this.log.error('WeCom file send failed: %s', String(error))
       }
     }
   }
