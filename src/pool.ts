@@ -2045,11 +2045,12 @@ export class AgentPool {
           // Outside a WeCom-driven turn (web-UI follow-up on this session, or a
           // session driven by another channel) the section renders empty.
           if (current === undefined) return ''
-          // When an enricher resolved the sender's RTX, surface it so the model
+          // When an enricher resolved the sender's name, surface it so the model
           // knows who is actually talking (and can attribute work / billing).
+          // The enricher decides the label — no deployment-specific prefix here.
           const who =
             current.resolved?.rtx !== undefined
-              ? `当前企业微信用户 ${current.userid}（工蜂 ${current.resolved.rtx}）`
+              ? `当前企业微信用户 ${current.userid}（${current.resolved.rtx}）`
               : `当前企业微信用户 ${current.userid}`
           const scope = current.chattype === 'group' ? '群聊' : '单聊'
           return `${who}，来自企微${scope}。`
